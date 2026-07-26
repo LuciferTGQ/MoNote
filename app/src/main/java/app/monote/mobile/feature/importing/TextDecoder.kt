@@ -33,11 +33,19 @@ class TextDecoder(private val maxInputBytes: Int = DEFAULT_MAX_INPUT_BYTES) {
 
     /** A BOM wins over a hint because it is part of the document's self-description. */
     fun decode(input: InputStream, hint: EncodingHint? = null): DecodedText {
-        val bytes = ByteArrayOutputStream().use { output ->
+        return decode(readBytes(input), hint)
+    }
+
+    /** Reads one bounded byte snapshot that callers may both decode and fingerprint. */
+    fun readBytes(input: InputStream): ByteArray {
+        return ByteArrayOutputStream().use { output ->
             val buffer = ByteArray(READ_BUFFER_BYTES)
             var total = 0
             while (true) {
-                val count = input.read(buffer)
+                val remainingWithSentinel = (maxInputBytes.toLong() - total + 1)
+                    .coerceAtMost(buffer.size.toLong())
+                    .toInt()
+                val count = input.read(buffer, 0, remainingWithSentinel)
                 if (count < 0) break
                 if (count == 0) continue
                 if (count > maxInputBytes - total) throw TextInputTooLargeException(maxInputBytes)
@@ -46,7 +54,6 @@ class TextDecoder(private val maxInputBytes: Int = DEFAULT_MAX_INPUT_BYTES) {
             }
             output.toByteArray()
         }
-        return decode(bytes, hint)
     }
 
     /** A BOM wins over a hint because it is part of the document's self-description. */

@@ -3,6 +3,7 @@ package app.monote.mobile.feature.importing
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -126,14 +127,36 @@ class TextDecoderTest {
         TextDecoder(maxInputBytes = 3).decode(UnknownLengthInputStream(remaining = 4))
     }
 
+    @Test
+    fun oversizedStreamIsRejectedAfterReadingAtMostOneBytePastTheLimit() {
+        val input = UnknownLengthInputStream(remaining = 1024 * 1024)
+
+        try {
+            TextDecoder(maxInputBytes = 3).decode(input)
+            throw AssertionError("Expected TextInputTooLargeException")
+        } catch (_: TextInputTooLargeException) {
+        }
+
+        assertTrue("read ${input.bytesRead} bytes", input.bytesRead <= 4)
+    }
+
     private class UnknownLengthInputStream(private var remaining: Int) : InputStream() {
-        override fun read(): Int = if (remaining-- > 0) 'a'.code else -1
+        var bytesRead: Int = 0
+            private set
+
+        override fun read(): Int = if (remaining-- > 0) {
+            bytesRead += 1
+            'a'.code
+        } else {
+            -1
+        }
 
         override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
             if (remaining == 0) return -1
             val count = minOf(length, remaining)
             repeat(count) { buffer[offset + it] = 'a'.code.toByte() }
             remaining -= count
+            bytesRead += count
             return count
         }
     }
