@@ -15,6 +15,7 @@
 - Execute from an isolated worktree created with `superpowers:using-git-worktrees`.
 - Use TDD for every behavior task: failing test, observed failure, minimal implementation, passing test, commit.
 - The current machine has Android SDK at `D:\Android\android-sdk` with API 31/33, but no JDK 17 or Gradle. Task 1 bootstraps workspace-local tools and installs API 36.
+- Lifecycle 2.10.0 is used for official AAR metadata compatibility with AGP 8.13.2 and compileSdk 36.
 - Do not request `android.permission.INTERNET`.
 - Do not store Markdown正文 in Room.
 - Do not add PDF/Office conversion, cloud sync, Wiki Links, or placeholder menus.
@@ -165,7 +166,7 @@ agp = "8.13.2"
 kotlin = "2.3.21"
 composeBom = "2026.06.00"
 activity = "1.13.0"
-lifecycle = "2.11.0"
+lifecycle = "2.10.0"
 navigation = "2.9.8"
 room = "2.8.4"
 webkit = "1.16.0"

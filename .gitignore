@@ -9,3 +9,7 @@ local.properties
 *.aab
 *.jks
 *.keystore
+.tools/
+renderer/node_modules/
+renderer/dist/
+app/src/main/assets/renderer/
