@@ -30,6 +30,14 @@ class CatalogRepository(
         dao.replaceIndex(document, body, tags)
     }
 
+    internal suspend fun replaceIndexAtPathDuringScan(
+        document: DocumentEntity,
+        body: String,
+        tags: Set<String>,
+    ) {
+        dao.replaceIndexAtPath(document, body, tags)
+    }
+
     internal suspend fun deleteMissingDuringScan(presentIds: Set<String>) {
         if (presentIds.isEmpty()) dao.deleteAll() else dao.deleteMissing(presentIds)
     }

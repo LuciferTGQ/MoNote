@@ -51,6 +51,7 @@ interface CatalogDao {
     @Transaction
     suspend fun deleteIndexedDocument(documentId: String) {
         deleteFts(documentId)
+        deleteTags(documentId)
         deleteDocument(documentId)
     }
 
@@ -74,5 +75,13 @@ interface CatalogDao {
         insertFts(DocumentFtsEntity(document.id, ftsSearchText(document.title), ftsSearchText(body)))
         deleteTags(document.id)
         insertTags(tags.sorted().map { DocumentTagEntity(document.id, it) })
+    }
+
+    @Transaction
+    suspend fun replaceIndexAtPath(document: DocumentEntity, body: String, tags: Set<String>) {
+        getByPath(document.relativePath)
+            ?.takeIf { it.id != document.id }
+            ?.let { deleteIndexedDocument(it.id) }
+        replaceIndex(document, body, tags)
     }
 }
