@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -37,11 +38,30 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 @Composable
-fun SplashOverlay(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val shouldShow = remember { SplashProcessState.hasShownSplash.compareAndSet(false, true) }
-    if (!shouldShow) return
+internal fun SplashGate(
+    initiallyVisible: Boolean? = null,
+    splash: @Composable (onFinished: () -> Unit) -> Unit = { onFinished ->
+        SplashOverlay(onFinished = onFinished)
+    },
+    content: @Composable () -> Unit,
+) {
+    val shouldShow = remember(initiallyVisible) {
+        initiallyVisible ?: SplashProcessState.hasShownSplash.compareAndSet(false, true)
+    }
+    var visible by remember(shouldShow) { mutableStateOf(shouldShow) }
+    if (visible) {
+        splash { visible = false }
+    } else {
+        content()
+    }
+}
 
+@Composable
+fun SplashOverlay(
+    onFinished: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
     val animationsDisabled = remember(context) {
         runCatching {
             Settings.Global.getFloat(
@@ -51,13 +71,13 @@ fun SplashOverlay(modifier: Modifier = Modifier) {
             ) == 0f
         }.getOrDefault(false)
     }
-    var visible by remember { mutableStateOf(true) }
     var progress by remember { mutableFloatStateOf(if (animationsDisabled) 1f else 0f) }
+    val currentOnFinished by rememberUpdatedState(onFinished)
 
     LaunchedEffect(animationsDisabled) {
         if (animationsDisabled) {
             withFrameNanos { }
-            visible = false
+            currentOnFinished()
             return@LaunchedEffect
         }
         val startedAt = withFrameNanos { it }
@@ -65,10 +85,10 @@ fun SplashOverlay(modifier: Modifier = Modifier) {
             val now = withFrameNanos { it }
             progress = ((now - startedAt) / TOTAL_NANOS.toFloat()).coerceIn(0f, 1f)
         } while (progress < 1f)
-        visible = false
+        currentOnFinished()
     }
 
-    if (visible) SplashFrame(progress = progress, modifier = modifier)
+    SplashFrame(progress = progress, modifier = modifier)
 }
 
 @Composable

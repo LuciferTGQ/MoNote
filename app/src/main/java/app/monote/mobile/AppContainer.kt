@@ -34,8 +34,8 @@ class AppContainer(context: Context) {
     private var initializedLibraryServices: LibraryServices? = null
 
     fun libraryServices(): LibraryServices {
-        check(Environment.isExternalStorageManager()) {
-            "External storage management permission is required"
+        if (!Environment.isExternalStorageManager()) {
+            throw SecurityException("External storage management permission is required")
         }
         initializedLibraryServices?.let { return it }
         return synchronized(libraryLock) {
@@ -46,8 +46,8 @@ class AppContainer(context: Context) {
     }
 
     private fun createLibraryServices(): LibraryServices {
-        check(Environment.isExternalStorageManager()) {
-            "External storage management permission was revoked"
+        if (!Environment.isExternalStorageManager()) {
+            throw SecurityException("External storage management permission was revoked")
         }
         val paths = LibraryPaths(libraryRoot).ensureCreated()
         val database = Room.databaseBuilder(
