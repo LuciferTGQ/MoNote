@@ -22,6 +22,7 @@ cross-device continuation.
 | 3. Transactional Markdown import | `8d8bb30` | 55 JVM tests passed; 2 Windows symlink-permission tests skipped; lint and APK verified |
 | 4. Room catalog, FTS, and JSON recovery | `b88bd3c` | 69 JVM tests and 12 API 30 instrumentation tests passed; lint and both APKs verified |
 | 5. Library operations, trash, and storage accounting | `c6f85d9` | 105 JVM tests and 12 API 30 Room regression tests passed; lint and both APKs verified |
+| 6. Offline CodeMirror and Markdown renderer | `b8894a9` | Clean offline install of 235 locked packages; 70 Vitest tests passed; TypeScript and Vite production build verified; security and quality reviews approved |
 
 Every completed implementation task is kept as an independent commit. A task is
 pushed only after specification review, code-quality review, and fresh
@@ -29,5 +30,5 @@ verification succeed. In-progress task code is not a rollback checkpoint.
 
 ## Current work
 
-- Task 6: offline CodeMirror and Markdown renderer — in progress, not yet
-  committed at the time this checkpoint log was created.
+- Task 7: secure Android WebView bridge and renderer asset packaging — next
+  implementation checkpoint.
