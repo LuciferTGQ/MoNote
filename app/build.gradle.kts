@@ -6,6 +6,57 @@ plugins {
     alias(libs.plugins.kotlin.kapt)
 }
 
+val rendererDir = rootProject.layout.projectDirectory.dir("renderer").asFile
+val defaultNpmCommand = if (
+    System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+) {
+    "npm.cmd"
+} else {
+    "npm"
+}
+val npm = providers.environmentVariable("NPM_CMD").orElse(defaultNpmCommand)
+val npmCache = rootProject.layout.projectDirectory.dir(".tools/npm-cache").asFile
+val generatedRendererRoot = layout.buildDirectory.dir("generated/rendererAssets")
+val generatedRenderer = generatedRendererRoot.map { it.dir("renderer") }
+
+val installRenderer by tasks.registering(Exec::class) {
+    workingDir(rendererDir)
+    commandLine(
+        npm.get(),
+        "--cache",
+        npmCache.absolutePath,
+        "ci",
+        "--no-audit",
+        "--no-fund",
+    )
+    inputs.files(
+        rendererDir.resolve("package.json"),
+        rendererDir.resolve("package-lock.json"),
+    )
+    outputs.dir(rendererDir.resolve("node_modules"))
+}
+
+val buildRenderer by tasks.registering(Exec::class) {
+    dependsOn(installRenderer)
+    workingDir(rendererDir)
+    commandLine(npm.get(), "--cache", npmCache.absolutePath, "run", "build")
+    inputs.dir(rendererDir.resolve("src"))
+    inputs.files(
+        rendererDir.resolve("package.json"),
+        rendererDir.resolve("package-lock.json"),
+        rendererDir.resolve("index.html"),
+        rendererDir.resolve("tsconfig.json"),
+        rendererDir.resolve("vite.config.ts"),
+    )
+    outputs.dir(rendererDir.resolve("dist"))
+}
+
+val syncRenderer by tasks.registering(Sync::class) {
+    dependsOn(buildRenderer)
+    from(rendererDir.resolve("dist"))
+    into(generatedRenderer)
+}
+
 android {
     namespace = "app.monote.mobile"
     compileSdk = 36
@@ -37,6 +88,8 @@ android {
     buildFeatures {
         compose = true
     }
+
+    sourceSets["main"].assets.srcDir(generatedRendererRoot)
 }
 
 kotlin {
@@ -73,4 +126,8 @@ kapt {
     arguments {
         arg("room.schemaLocation", "$projectDir/schemas")
     }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(syncRenderer)
 }

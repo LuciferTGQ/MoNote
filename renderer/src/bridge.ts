@@ -214,7 +214,8 @@ export interface NativeChannel {
 
 export interface NativeChannelOptions {
   trustedOrigin?: string
-  trustedSource?: MessageEventSource
+  trustedSource?: MessageEventSource | null
+  allowTrustedEmptyOrigin?: boolean
 }
 
 export function createNativeChannel(
@@ -224,7 +225,9 @@ export function createNativeChannel(
   let port: MessagePort | null = null
   const pending: string[] = []
   const trustedOrigin = options.trustedOrigin ?? window.location.origin
-  const trustedSource = options.trustedSource ?? window
+  const trustedSource =
+    options.trustedSource === undefined ? window : options.trustedSource
+  const allowTrustedEmptyOrigin = options.allowTrustedEmptyOrigin ?? false
 
   const receive = (value: unknown) => {
     if (typeof value !== "string") return
@@ -233,7 +236,14 @@ export function createNativeChannel(
   }
   const onPortMessage = (event: MessageEvent<unknown>) => receive(event.data)
   const onWindowMessage = (event: MessageEvent<unknown>) => {
-    if (event.origin !== trustedOrigin || event.source !== trustedSource) return
+    const hasTrustedOrigin =
+      event.origin === trustedOrigin ||
+      (allowTrustedEmptyOrigin &&
+        event.origin === "" &&
+        event.isTrusted &&
+        event.source === null &&
+        event.ports.length === 1)
+    if (!hasTrustedOrigin || event.source !== trustedSource) return
     const transferredPort = event.ports[0]
     if (transferredPort && port === null) {
       port = transferredPort

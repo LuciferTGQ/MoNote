@@ -161,6 +161,61 @@ describe("bridge protocol", () => {
     channel.dispose()
   })
 
+  it("can reserve source-null messages for the Android native bootstrap", () => {
+    const receive = vi.fn()
+    const channel = createNativeChannel(receive, {
+      trustedOrigin: "https://appassets.androidplatform.net",
+      trustedSource: null,
+    })
+    const message = JSON.stringify({
+      type: "setMode",
+      mode: "preview",
+    })
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: message,
+        origin: "https://appassets.androidplatform.net",
+        source: window,
+      }),
+    )
+    expect(receive).not.toHaveBeenCalled()
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: message,
+        origin: "https://appassets.androidplatform.net",
+        source: null,
+      }),
+    )
+    expect(receive).toHaveBeenCalledOnce()
+    channel.dispose()
+  })
+
+  it("rejects a synthetic empty-origin Android bootstrap", () => {
+    const receive = vi.fn()
+    const channel = createNativeChannel(receive, {
+      trustedOrigin: "https://appassets.androidplatform.net",
+      trustedSource: null,
+      allowTrustedEmptyOrigin: true,
+    })
+    const message = JSON.stringify({
+      type: "setMode",
+      mode: "preview",
+    })
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: message,
+        origin: "",
+        source: null,
+      }),
+    )
+
+    expect(receive).not.toHaveBeenCalled()
+    channel.dispose()
+  })
+
   it("binds the transferred native port only once", () => {
     const firstPort = {
       addEventListener: vi.fn(),

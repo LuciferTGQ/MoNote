@@ -143,7 +143,11 @@ function receiveNativeMessage(message: NativeMessage): void {
   }
 }
 
-channel = createNativeChannel(receiveNativeMessage)
+channel = createNativeChannel(receiveNativeMessage, {
+  trustedOrigin: window.location.origin,
+  trustedSource: null,
+  allowTrustedEmptyOrigin: true,
+})
 const disposeLinks = bindExternalLinkBridge(previewPane, (message) =>
   channel.send(message),
 )
