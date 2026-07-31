@@ -46,7 +46,11 @@ class AtomicTextStoreTest {
 
         val failure = IllegalStateException("stop before commit")
         try {
-            AtomicTextStore().replace(target.toFile(), "replacement") { throw failure }
+            AtomicTextStore().replace(
+                target.toFile(),
+                "replacement",
+                beforeCommit = { throw failure },
+            )
         } catch (actual: IllegalStateException) {
             assertEquals(failure, actual)
         }
@@ -72,6 +76,37 @@ class AtomicTextStoreTest {
         assertEquals(Files.size(target), fingerprint.size)
         assertEquals(modifiedAt.toMillis(), fingerprint.modifiedAt)
         assertEquals("16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4", fingerprint.sha256)
+    }
+
+    @Test
+    fun beforeReplaceDetectsAChangeAfterTheEarlyCommitCheck() {
+        val directory = temporaryDirectory()
+        val target = directory.resolve("note.md")
+        val backup = directory.resolve("backups/note.md")
+        target.writeText("original", StandardCharsets.UTF_8)
+        val baseline = DocumentFingerprint.from(target.toFile())
+        val conflict = IllegalStateException("external change")
+
+        try {
+            AtomicTextStore().replace(
+                target = target.toFile(),
+                text = "mine",
+                backup = backup.toFile(),
+                beforeCommit = {
+                    assertEquals(baseline, DocumentFingerprint.from(target.toFile()))
+                    target.writeText("external", StandardCharsets.UTF_8)
+                },
+                beforeReplace = {
+                    if (DocumentFingerprint.from(target.toFile()) != baseline) throw conflict
+                },
+            )
+        } catch (actual: IllegalStateException) {
+            assertEquals(conflict, actual)
+        }
+
+        assertEquals("external", target.readText(StandardCharsets.UTF_8))
+        assertEquals("external", backup.readText(StandardCharsets.UTF_8))
+        assertFalse(target.resolveSibling("note.md.monote-tmp").exists())
     }
 
     @Test

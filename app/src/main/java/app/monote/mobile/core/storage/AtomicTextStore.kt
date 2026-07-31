@@ -21,6 +21,8 @@ import java.util.concurrent.locks.ReentrantLock
  * Safely replaces trusted library files, but does not defend against a separate malicious process
  * replacing links after validation. ATOMIC_MOVE depends on the file system; fallback moves and the
  * lack of a parent-directory fsync do not provide a power-loss transaction (Task14 follow-up).
+ * [beforeReplace] narrows external-change detection to the last application-level step before the
+ * move, but another process can still race the operating-system move after that callback.
  * Fixed temporary paths are serialized with every path in one replacement; any same-thread nested
  * call is rejected with IllegalStateException to preserve the global lock ordering.
  */
@@ -29,6 +31,7 @@ class AtomicTextStore {
         target: File,
         text: String,
         backup: File? = null,
+        beforeReplace: (() -> Unit)? = null,
         beforeCommit: (() -> Unit)? = null,
     ) {
         val targetPath = target.toPath().toAbsolutePath().normalize()
@@ -46,7 +49,15 @@ class AtomicTextStore {
         val lockIndices = reservedPaths.map(::lockIndex).distinct().sorted()
         lockIndices.forEach { locks[it].lock() }
         try {
-            replaceText(targetPath, targetTemporary, text, backupPath, backupTemporary, beforeCommit)
+            replaceText(
+                targetPath,
+                targetTemporary,
+                text,
+                backupPath,
+                backupTemporary,
+                beforeCommit,
+                beforeReplace,
+            )
         } finally {
             lockIndices.asReversed().forEach { locks[it].unlock() }
             active.removeAll(reservedPaths.toSet())
@@ -61,6 +72,7 @@ class AtomicTextStore {
         backup: Path?,
         backupTemporary: Path?,
         beforeCommit: (() -> Unit)?,
+        beforeReplace: (() -> Unit)?,
     ) {
         ensureTargetIsWritableFile(target)
         try {
@@ -79,6 +91,7 @@ class AtomicTextStore {
                     Files.deleteIfExists(temporaryBackup)
                 }
             }
+            beforeReplace?.invoke()
             moveReplacement(temporary, target)
         } finally {
             Files.deleteIfExists(temporary)

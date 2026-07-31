@@ -21,6 +21,6 @@ class MarkdownDocumentHandler(private val store: AtomicTextStore = AtomicTextSto
         backup: File?,
         beforeCommit: (() -> Unit)?,
     ) = withContext(Dispatchers.IO) {
-        store.replace(file, text, backup, beforeCommit)
+        store.replace(file, text, backup, beforeCommit = beforeCommit)
     }
 }
