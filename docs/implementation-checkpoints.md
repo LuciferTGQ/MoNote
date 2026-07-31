@@ -24,6 +24,7 @@ cross-device continuation.
 | 5. Library operations, trash, and storage accounting | `c6f85d9` | 105 JVM tests and 12 API 30 Room regression tests passed; lint and both APKs verified |
 | 6. Offline CodeMirror and Markdown renderer | `b8894a9` | Clean offline install of 235 locked packages; 70 Vitest tests passed; TypeScript and Vite production build verified; security and quality reviews approved |
 | 7. Trusted Android document surface | `ba5bd32` | 72 Vitest tests, 106 JVM tests, and 2 API 30 WebView integration tests passed; 4 Windows-only permission cases skipped; lint and debug APK verified |
+| 8. Document sessions, recovery, and conflicts | `f00f404` | 131 JVM tests passed; 5 Windows-only symbolic-link permission cases skipped; lint reported 0 errors; debug APK and targeted code review verified |
 
 Every completed implementation task is kept as an independent commit. A task is
 pushed only after specification review, code-quality review, and fresh
@@ -31,5 +32,5 @@ verification succeed. In-progress task code is not a rollback checkpoint.
 
 ## Current work
 
-- Task 8: document session, auto-save, recovery, and conflicts — next
+- Task 9: application container, permission onboarding, navigation, and brand - next
   implementation checkpoint.
