@@ -102,6 +102,7 @@ internal fun AuthorizedShell(
         } catch (error: CancellationException) {
             throw error
         } catch (_: SecurityException) {
+            state = InitializationState.Failed
             currentPermissionLost()
         } catch (_: Exception) {
             state = InitializationState.Failed

@@ -58,6 +58,9 @@ class ShellStartupTest {
         }
 
         composeRule.waitUntil(timeoutMillis = 5_000) { refreshed.get() }
+        waitForText("资料库初始化失败")
+        composeRule.onNodeWithText("资料库初始化失败").assertIsDisplayed()
+        composeRule.onNodeWithText("重试").assertIsDisplayed()
         composeRule.onNodeWithTag("route-library").assertDoesNotExist()
     }
 
