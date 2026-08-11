@@ -27,6 +27,7 @@ cross-device continuation.
 | 8. Document sessions, recovery, and conflicts | `f00f404` | 131 JVM tests passed; 5 Windows-only symbolic-link permission cases skipped; lint reported 0 errors; debug APK and targeted code review verified |
 | 9. Application shell, permission onboarding, navigation, and brand | `c2077bc` | 131 JVM tests and 6 API 30 Compose tests passed; 5 Windows-only symbolic-link permission cases skipped; lint reported 0 errors; forbidden manifest permissions absent; debug APK and two-stage review verified |
 | 10. Library, folder import, search, metadata, trash, and storage UI | `1398557` | 72 renderer tests, 173 JVM tests, 12 API 30 library Compose tests, and the trusted WebView round trip passed; 5 environment-specific JVM cases skipped; lint reported 0 errors; forbidden permissions absent; renderer-complete debug APK verified |
+| 11. Receive Markdown from WeChat and other Android apps | `a75b6c6` | 14 API 30 incoming-Intent tests and the trusted WebView round trip passed; 173 JVM regressions passed with 5 environment skips; lint reported 0 errors; four precise external actions, non-exported debug provider, forbidden-permission absence, and renderer-complete APK verified (`ED7E1CB2…A392D`) |
 
 Every completed implementation task is kept as an independent commit. A task is
 pushed only after specification review, code-quality review, and fresh
@@ -34,5 +35,5 @@ verification succeed. In-progress task code is not a rollback checkpoint.
 
 ## Current work
 
-- Task 11: receive Markdown from WeChat and other Android apps - next
+- Task 12: responsive editor, toolbar, orientation locks, and exit flow - next
   implementation checkpoint.
