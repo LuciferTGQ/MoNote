@@ -15,6 +15,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -251,6 +253,253 @@ class LibraryServiceTest {
         assertTrue(moved.favorite)
         assertEquals(setOf("new"), environment.catalog.tags(moved.id))
         assertEquals(null, environment.catalog.getByPath("folder/note.md"))
+    }
+
+    @Test
+    fun batchMovePreflightsEveryConflictBeforeMovingAnything() = runBlocking {
+        val environment = environment()
+        val one = environment.paths.root.resolve("one.md").apply { writeText("one") }
+        val two = environment.paths.root.resolve("two.md").apply { writeText("two") }
+        val destination = environment.paths.root.resolve("target").apply { mkdir() }
+        destination.resolve("two.md").writeText("occupied")
+
+        val result = environment.service.moveBatch(listOf(one, two), destination)
+
+        assertTrue(result is BatchMoveResult.Conflict)
+        assertTrue(one.exists())
+        assertTrue(two.exists())
+        assertFalse(destination.resolve("one.md").exists())
+        assertEquals("occupied", destination.resolve("two.md").readText())
+    }
+
+    @Test
+    fun batchMoveRollsBackEarlierMovesWhenAMiddleMoveFails() = runBlocking {
+        val environment = environment()
+        val one = environment.paths.root.resolve("one.md").apply { writeText("one") }
+        val two = environment.paths.root.resolve("two.md").apply { writeText("two") }
+        val destination = environment.paths.root.resolve("target").apply { mkdir() }
+        val operations = LibraryFileOperations { source, target ->
+            if (source == two.toPath()) throw IOException("injected second move failure")
+            Files.move(source, target)
+        }
+        val service = LibraryService(environment.paths, environment.catalog, fileOperations = operations)
+
+        val result = service.moveBatch(listOf(one, two), destination)
+
+        val failure = result as BatchMoveResult.Failure
+        assertTrue(failure.rolledBack)
+        assertTrue(failure.recoveryRecords.isEmpty())
+        assertEquals("one", one.readText())
+        assertEquals("two", two.readText())
+        assertTrue(destination.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun renamePreservesDirectoryFavoriteAndTagsAtTheNewPath() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdir() }
+        val metadata = DirectoryMetadataRepository(environment.paths)
+        metadata.setFavorite(setOf("course"), true)
+        metadata.setTags(setOf("course"), setOf("study"))
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            directoryMetadataRepository = metadata,
+        )
+
+        val result = service.rename(folder, "renamed")
+
+        assertTrue(result is LibraryResult.Success)
+        assertFalse("course" in metadata.metadata.value)
+        val moved = metadata.metadata.value.getValue("renamed")
+        assertTrue(moved.favorite)
+        assertEquals(setOf("study"), moved.tags)
+    }
+
+    @Test
+    fun batchMovePreservesMetadataForEveryMovedDirectory() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdir() }
+        val second = environment.paths.root.resolve("second").apply { mkdir() }
+        val destination = environment.paths.root.resolve("archive").apply { mkdir() }
+        val metadata = DirectoryMetadataRepository(environment.paths)
+        metadata.setFavorite(setOf("first"), true)
+        metadata.setTags(setOf("second"), setOf("tagged"))
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            directoryMetadataRepository = metadata,
+        )
+
+        val result = service.moveBatch(listOf(first, second), destination)
+
+        assertTrue(result is BatchMoveResult.Success)
+        assertTrue(metadata.metadata.value.getValue("archive/first").favorite)
+        assertEquals(setOf("tagged"), metadata.metadata.value.getValue("archive/second").tags)
+        assertFalse("first" in metadata.metadata.value)
+        assertFalse("second" in metadata.metadata.value)
+    }
+
+    @Test
+    fun rollbackFailurePersistsRecoveryKeepsOldMetadataAndRequestsRescan() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdir() }
+        val second = environment.paths.root.resolve("second").apply { mkdir() }
+        val destination = environment.paths.root.resolve("archive").apply { mkdir() }
+        val metadata = DirectoryMetadataRepository(environment.paths)
+        metadata.setFavorite(setOf("first"), true)
+        val recovery = MoveRecoveryRepository(environment.paths)
+        var rescanRequests = 0
+        val operations = LibraryFileOperations { source, target ->
+            when (source) {
+                second.toPath() -> throw IOException("injected second move failure")
+                destination.resolve("first").toPath() -> throw IOException("injected rollback failure")
+                else -> Files.move(source, target)
+            }
+        }
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            directoryMetadataRepository = metadata,
+            moveRecoveryRepository = recovery,
+            fileOperations = operations,
+            requestRescan = { rescanRequests++ },
+        )
+
+        val result = service.moveBatch(listOf(first, second), destination)
+
+        val failure = result as BatchMoveResult.Failure
+        assertFalse(failure.rolledBack)
+        assertEquals(1, failure.recoveryRecords.size)
+        assertEquals(1, rescanRequests)
+        assertTrue(metadata.metadata.value.getValue("first").favorite)
+        assertFalse("archive/first" in metadata.metadata.value)
+        assertEquals(
+            failure.recoveryRecords.map { it.id },
+            MoveRecoveryRepository(environment.paths).records.value.map { it.id },
+        )
+    }
+
+    @Test
+    fun rollbackRecoveryJournalExceptionIsReportedWithoutPretendingRecordsWerePersisted() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdir() }
+        val second = environment.paths.root.resolve("second").apply { mkdir() }
+        val destination = environment.paths.root.resolve("archive").apply { mkdir() }
+        var rescanRequests = 0
+        val operations = LibraryFileOperations { source, target ->
+            when (source) {
+                second.toPath() -> throw IOException("injected second move failure")
+                destination.resolve("first").toPath() -> throw IOException("injected rollback failure")
+                else -> Files.move(source, target)
+            }
+        }
+        val recoveryStore = object : MoveRecoveryStore {
+            override val records: StateFlow<List<MoveRecoveryRecord>> = MutableStateFlow(emptyList())
+
+            override suspend fun record(failures: List<MoveRecoveryRecord>): RecoveryWriteResult {
+                throw IOException("journal unavailable")
+            }
+
+            override suspend fun recover(id: String): LibraryResult = error("not used")
+        }
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            moveRecoveryRepository = recoveryStore,
+            fileOperations = operations,
+            requestRescan = { rescanRequests++ },
+        )
+
+        val result = service.moveBatch(listOf(first, second), destination)
+
+        val failure = result as BatchMoveResult.Failure
+        assertFalse(failure.rolledBack)
+        assertTrue(failure.recoveryRecords.isEmpty())
+        assertTrue(failure.recoveryPersistenceFailure.orEmpty().contains("journal unavailable"))
+        assertEquals(1, rescanRequests)
+        assertTrue(recoveryStore.records.value.isEmpty())
+        val message = batchMoveFailureMessage(failure)
+        assertTrue(message.contains("严重"))
+        assertFalse(message.contains("已记录待恢复"))
+    }
+
+    @Test
+    fun rollbackRecoveryJournalCancellationStillReturnsAVisibleFailureAndRequestsRescan() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdir() }
+        val second = environment.paths.root.resolve("second").apply { mkdir() }
+        val destination = environment.paths.root.resolve("archive").apply { mkdir() }
+        var rescanRequests = 0
+        val operations = LibraryFileOperations { source, target ->
+            when (source) {
+                second.toPath() -> throw IOException("injected second move failure")
+                destination.resolve("first").toPath() -> throw IOException("injected rollback failure")
+                else -> Files.move(source, target)
+            }
+        }
+        val recoveryStore = object : MoveRecoveryStore {
+            override val records: StateFlow<List<MoveRecoveryRecord>> = MutableStateFlow(emptyList())
+
+            override suspend fun record(failures: List<MoveRecoveryRecord>): RecoveryWriteResult {
+                throw CancellationException("journal cancelled")
+            }
+
+            override suspend fun recover(id: String): LibraryResult = error("not used")
+        }
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            moveRecoveryRepository = recoveryStore,
+            fileOperations = operations,
+            requestRescan = { rescanRequests++ },
+        )
+
+        val result = service.moveBatch(listOf(first, second), destination)
+
+        val failure = result as BatchMoveResult.Failure
+        assertFalse(failure.rolledBack)
+        assertTrue(failure.recoveryRecords.isEmpty())
+        assertTrue(failure.recoveryPersistenceFailure.orEmpty().contains("journal cancelled"))
+        assertEquals(1, rescanRequests)
+        val message = batchMoveFailureMessage(failure)
+        assertTrue(message.contains("严重"))
+        assertFalse(message.contains("已记录待恢复"))
+    }
+
+    @Test
+    fun cancelledBatchFailureWithFailedRollbackPersistsRecoveryBeforeReturningFailure() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdir() }
+        val second = environment.paths.root.resolve("second").apply { mkdir() }
+        val destination = environment.paths.root.resolve("archive").apply { mkdir() }
+        val recovery = MoveRecoveryRepository(environment.paths)
+        var rescanRequests = 0
+        val operations = LibraryFileOperations { source, target ->
+            when (source) {
+                second.toPath() -> throw CancellationException("cancel batch")
+                destination.resolve("first").toPath() -> throw IOException("injected rollback failure")
+                else -> Files.move(source, target)
+            }
+        }
+        val service = LibraryService(
+            environment.paths,
+            environment.catalog,
+            moveRecoveryRepository = recovery,
+            fileOperations = operations,
+            requestRescan = { rescanRequests++ },
+        )
+
+        val result = service.moveBatch(listOf(first, second), destination)
+
+        val failure = result as BatchMoveResult.Failure
+        assertFalse(failure.rolledBack)
+        assertEquals(1, failure.recoveryRecords.size)
+        assertEquals(1, rescanRequests)
+        assertEquals(
+            failure.recoveryRecords.map { it.id },
+            MoveRecoveryRepository(environment.paths).records.value.map { it.id },
+        )
     }
 
     private fun environment(): TestEnvironment {

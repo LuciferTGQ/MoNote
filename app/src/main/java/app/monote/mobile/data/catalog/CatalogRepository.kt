@@ -2,6 +2,7 @@ package app.monote.mobile.data.catalog
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.Flow
 
 /** Coordinates Room's searchable catalog with the small, recoverable metadata mirror. */
 class CatalogRepository(
@@ -11,6 +12,8 @@ class CatalogRepository(
     private val mutationMutex = Mutex()
 
     suspend fun all(): List<DocumentEntity> = dao.all()
+
+    fun observeAll(): Flow<List<DocumentEntity>> = dao.observeAll()
 
     suspend fun getByPath(relativePath: String): DocumentEntity? = dao.getByPath(relativePath)
 
@@ -58,6 +61,16 @@ class CatalogRepository(
     suspend fun restoreMirror(): CatalogSnapshot = mirror.read()
 
     suspend fun refreshMirror() = mutationMutex.withLock {
+        refreshMirrorDuringScan()
+    }
+
+    suspend fun setFavorite(documentIds: Set<String>, favorite: Boolean) = mutationMutex.withLock {
+        if (documentIds.isNotEmpty()) dao.setFavorite(documentIds, favorite)
+        refreshMirrorDuringScan()
+    }
+
+    suspend fun setTags(documentIds: Set<String>, tags: Set<String>) = mutationMutex.withLock {
+        documentIds.forEach { dao.replaceTags(it, tags) }
         refreshMirrorDuringScan()
     }
 

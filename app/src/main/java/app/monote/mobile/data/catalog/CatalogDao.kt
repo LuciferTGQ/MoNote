@@ -45,6 +45,9 @@ interface CatalogDao {
     @Query("DELETE FROM documents")
     suspend fun deleteAllDocuments()
 
+    @Query("UPDATE documents SET favorite = :favorite WHERE id IN (:documentIds)")
+    suspend fun setFavorite(documentIds: Set<String>, favorite: Boolean)
+
     @Query("DELETE FROM document_fts")
     suspend fun deleteAllFts()
 
@@ -83,5 +86,11 @@ interface CatalogDao {
             ?.takeIf { it.id != document.id }
             ?.let { deleteIndexedDocument(it.id) }
         replaceIndex(document, body, tags)
+    }
+
+    @Transaction
+    suspend fun replaceTags(documentId: String, tags: Set<String>) {
+        deleteTags(documentId)
+        insertTags(tags.sorted().map { DocumentTagEntity(documentId, it) })
     }
 }

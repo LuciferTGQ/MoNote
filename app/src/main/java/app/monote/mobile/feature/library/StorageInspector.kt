@@ -14,6 +14,7 @@ internal fun interface StorageTreeReader {
     fun measure(
         directory: Path,
         excluded: Set<Path>,
+        include: (Path, BasicFileAttributes) -> Boolean,
         warning: (Path, IOException) -> Unit,
     ): Long
 }
@@ -33,7 +34,11 @@ class StorageInspector internal constructor(
         val systemPath = paths.system.toPath().toAbsolutePath().normalize()
         val warnings = mutableListOf<String>()
         return StorageBreakdown(
-            documentsBytes = measureCategory("documents", paths.root.toPath(), setOf(systemPath), warnings),
+            documentsBytes = measureCategory("documents", paths.root.toPath(), setOf(systemPath), warnings, ::isMarkdown),
+            attachmentsBytes = measureCategory("attachments", paths.root.toPath(), setOf(systemPath), warnings) { path, attributes ->
+                attributes.isRegularFile && !isMarkdown(path, attributes)
+            },
+            backupsBytes = measureCategory("backups", paths.backups.toPath(), emptySet(), warnings),
             trashBytes = measureCategory("trash", paths.trash.toPath(), emptySet(), warnings),
             recoveryBytes = measureCategory("recovery", paths.recovery.toPath(), emptySet(), warnings),
             cacheBytes = measureCategory("cache", cacheDirectory.toPath(), emptySet(), warnings),
@@ -46,12 +51,13 @@ class StorageInspector internal constructor(
         directory: Path,
         excluded: Set<Path>,
         warnings: MutableList<String>,
+        include: (Path, BasicFileAttributes) -> Boolean = { _, attributes -> attributes.isRegularFile },
     ): Long {
         val report: (Path, IOException) -> Unit = { path, error ->
             warnings += "$category: $path: ${error.javaClass.simpleName}: ${error.message.orEmpty()}"
         }
         return try {
-            reader.measure(directory, excluded, report)
+            reader.measure(directory, excluded, include, report)
         } catch (error: Exception) {
             warnings += "$category: $directory: ${error.javaClass.simpleName}: ${error.message.orEmpty()}"
             0L
@@ -63,6 +69,7 @@ private object NioStorageTreeReader : StorageTreeReader {
     override fun measure(
         directory: Path,
         excluded: Set<Path>,
+        include: (Path, BasicFileAttributes) -> Boolean,
         warning: (Path, IOException) -> Unit,
     ): Long {
         val normalized = directory.toAbsolutePath().normalize()
@@ -83,7 +90,7 @@ private object NioStorageTreeReader : StorageTreeReader {
             }
 
             override fun visitFile(path: Path, attributes: BasicFileAttributes): FileVisitResult {
-                if (attributes.isRegularFile && !Files.isSymbolicLink(path)) total += attributes.size()
+                if (!Files.isSymbolicLink(path) && include(path, attributes)) total += attributes.size()
                 return FileVisitResult.CONTINUE
             }
 
@@ -99,4 +106,10 @@ private object NioStorageTreeReader : StorageTreeReader {
         })
         return total
     }
+}
+
+private fun isMarkdown(path: Path, attributes: BasicFileAttributes): Boolean {
+    if (!attributes.isRegularFile) return false
+    val name = path.fileName.toString().lowercase()
+    return name.endsWith(".md") || name.endsWith(".markdown")
 }

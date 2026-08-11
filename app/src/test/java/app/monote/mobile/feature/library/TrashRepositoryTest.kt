@@ -11,7 +11,10 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Comparator
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -331,6 +334,348 @@ class TrashRepositoryTest {
     }
 
     @Test
+    fun directoryFavoriteAndTagsRoundTripThroughTrash() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        environment.directoryMetadata.setTags(setOf("course"), setOf("review"))
+
+        val entry = environment.repository.moveToTrash(
+            folder,
+            Instant.parse("2026-07-01T00:00:00Z"),
+            "directory-entry",
+        )
+
+        assertFalse("course" in environment.directoryMetadata.metadata.value)
+        assertTrue(environment.repository.restore(entry) is LibraryResult.Success)
+        val restored = environment.directoryMetadata.metadata.value.getValue("course")
+        assertTrue(restored.favorite)
+        assertEquals(setOf("review"), restored.tags)
+    }
+
+    @Test
+    fun permanentDeletePreventsARecreatedPathFromInheritingDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(
+            folder,
+            Instant.parse("2026-07-01T00:00:00Z"),
+            "deleted-directory",
+        )
+
+        assertTrue(
+            environment.repository.deletePermanently(entry.stableId, confirmed = true) is TrashDeleteResult.Success,
+        )
+        environment.paths.root.resolve("course").mkdirs()
+        val restarted = DirectoryMetadataRepository(environment.paths)
+        restarted.restoreFromTrash(entry.stableId, "course")
+
+        assertFalse("course" in restarted.metadata.value)
+    }
+
+    @Test
+    fun retryingPermanentDeleteReconcilesMetadataAfterTheFirstWriteFailed() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(folder, stableId = "retry-delete-directory")
+        val blocker = blockDirectoryMetadataWrite(environment.paths)
+
+        val first = environment.repository.deletePermanently(entry.stableId, confirmed = true)
+        unblockDirectoryMetadataWrite(blocker)
+        val retry = environment.repository.deletePermanently(entry.stableId, confirmed = true)
+
+        assertTrue(first is TrashDeleteResult.Failure)
+        assertTrue(retry is TrashDeleteResult.NotFound)
+        assertFalse(environment.paths.trash.resolve(entry.stableId).exists())
+        environment.paths.root.resolve("course").mkdirs()
+        val restarted = DirectoryMetadataRepository(environment.paths)
+        restarted.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in restarted.metadata.value)
+    }
+
+    @Test
+    fun emptyTrashClearsEveryHeldDirectoryMetadataBucket() = runBlocking {
+        val environment = environment()
+        val first = environment.paths.root.resolve("first").apply { mkdirs() }
+        val second = environment.paths.root.resolve("second").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("first", "second"), true)
+        environment.repository.moveToTrash(first, stableId = "first-directory")
+        environment.repository.moveToTrash(second, stableId = "second-directory")
+
+        assertTrue(environment.repository.emptyTrash(confirmed = true) is TrashDeleteResult.Success)
+        environment.paths.root.resolve("first").mkdirs()
+        environment.paths.root.resolve("second").mkdirs()
+        val restarted = DirectoryMetadataRepository(environment.paths)
+        restarted.restoreFromTrash("first-directory", "first")
+        restarted.restoreFromTrash("second-directory", "second")
+
+        assertTrue(restarted.metadata.value.isEmpty())
+    }
+
+    @Test
+    fun retryingEmptyTrashReconcilesMetadataEvenWhenTheTrashIsAlreadyEmpty() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setTags(setOf("course"), setOf("old-tag"))
+        val entry = environment.repository.moveToTrash(folder, stableId = "retry-empty-directory")
+        val blocker = blockDirectoryMetadataWrite(environment.paths)
+
+        val first = environment.repository.emptyTrash(confirmed = true)
+        unblockDirectoryMetadataWrite(blocker)
+        val retry = environment.repository.emptyTrash(confirmed = true)
+
+        assertTrue(first is TrashDeleteResult.Failure)
+        assertEquals(TrashDeleteResult.Success(emptySet()), retry)
+        assertFalse(environment.paths.trash.resolve(entry.stableId).exists())
+        environment.paths.root.resolve("course").mkdirs()
+        val restarted = DirectoryMetadataRepository(environment.paths)
+        restarted.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in restarted.metadata.value)
+    }
+
+    @Test
+    fun expiredPurgeClearsHeldDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val now = Instant.parse("2026-08-01T00:00:00Z")
+        val folder = environment.paths.root.resolve("old-course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("old-course"), true)
+        environment.repository.moveToTrash(
+            folder,
+            now.minus(Duration.ofDays(31)),
+            "expired-directory",
+        )
+
+        assertTrue(environment.repository.purgeExpired(now, confirmed = true) is TrashDeleteResult.Success)
+        environment.paths.root.resolve("old-course").mkdirs()
+        val restarted = DirectoryMetadataRepository(environment.paths)
+        restarted.restoreFromTrash("expired-directory", "old-course")
+
+        assertTrue(restarted.metadata.value.isEmpty())
+    }
+
+    @Test
+    fun listAfterFailedPurgeReconcilesRestartedMetadataAndIgnoresInvalidTrashChildren() = runBlocking {
+        val environment = environment()
+        val now = Instant.parse("2026-08-01T00:00:00Z")
+        val folder = environment.paths.root.resolve("old-course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("old-course"), true)
+        val entry = environment.repository.moveToTrash(
+            folder,
+            now.minus(Duration.ofDays(31)),
+            "retry-purge-directory",
+        )
+        val temporaryFolder = environment.paths.root.resolve("temporary-source").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("temporary-source"), true)
+        val temporaryEntry = environment.repository.moveToTrash(
+            temporaryFolder,
+            now,
+            "leftover.monote-tmp",
+        )
+        val blocker = blockDirectoryMetadataWrite(environment.paths)
+
+        val first = environment.repository.purgeExpired(now, confirmed = true)
+        unblockDirectoryMetadataWrite(blocker)
+        val temporaryRoot = environment.paths.trash.resolve(temporaryEntry.stableId).toPath()
+        Files.walk(temporaryRoot).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).filter { it != temporaryRoot }.forEach(Files::deleteIfExists)
+        }
+        environment.paths.trash.resolve("invalid child").mkdirs()
+        val restartedMetadata = DirectoryMetadataRepository(environment.paths)
+        val restartedTrash = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = restartedMetadata,
+        )
+
+        val entries = restartedTrash.listEntries()
+
+        assertTrue(first is TrashDeleteResult.Failure)
+        assertTrue(entries.isEmpty())
+        environment.paths.root.resolve("old-course").mkdirs()
+        environment.paths.root.resolve("temporary-source").mkdirs()
+        restartedMetadata.restoreFromTrash(entry.stableId, "old-course")
+        restartedMetadata.restoreFromTrash(temporaryEntry.stableId, "temporary-source")
+        assertFalse("old-course" in restartedMetadata.metadata.value)
+        assertFalse("temporary-source" in restartedMetadata.metadata.value)
+    }
+
+    @Test
+    fun corruptValidNamedTrashDirectoryDoesNotProtectOrphanDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setTags(setOf("course"), setOf("orphaned"))
+        val entry = environment.repository.moveToTrash(folder, stableId = "corrupt-valid-id")
+        val entryRoot = environment.paths.trash.resolve(entry.stableId).toPath()
+        Files.walk(entryRoot).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).filter { it != entryRoot }.forEach(Files::deleteIfExists)
+        }
+
+        val listed = environment.repository.listEntries()
+
+        assertTrue(listed.isEmpty())
+        environment.paths.root.resolve("course").mkdirs()
+        environment.directoryMetadata.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in environment.directoryMetadata.metadata.value)
+    }
+
+    @Test
+    fun startupReconciliationClearsOrphanMetadataWithoutListingTrash() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(folder, stableId = "startup-orphan-id")
+        val entryRoot = environment.paths.trash.resolve(entry.stableId).toPath()
+        Files.walk(entryRoot).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+        val restartedMetadata = DirectoryMetadataRepository(environment.paths)
+        val restartedTrash = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = restartedMetadata,
+        )
+
+        restartedTrash.reconcileStartup()
+
+        environment.paths.root.resolve("course").mkdirs()
+        restartedMetadata.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in restartedMetadata.metadata.value)
+    }
+
+    @Test
+    fun startupReconciliationCanRetryAfterAtomicMetadataWriteFailure() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(folder, stableId = "startup-retry-id")
+        val entryRoot = environment.paths.trash.resolve(entry.stableId).toPath()
+        Files.walk(entryRoot).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+        val restartedMetadata = DirectoryMetadataRepository(environment.paths)
+        val restartedTrash = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = restartedMetadata,
+        )
+        val blocker = blockDirectoryMetadataWrite(environment.paths)
+
+        val first = runCatching { restartedTrash.reconcileStartup() }
+        unblockDirectoryMetadataWrite(blocker)
+        restartedTrash.reconcileStartup()
+
+        assertTrue(first.isFailure)
+        environment.paths.root.resolve("course").mkdirs()
+        restartedMetadata.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in restartedMetadata.metadata.value)
+    }
+
+    @Test
+    fun startupReconciliationCannotEraseMetadataFromACompetingTrashMove() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val scanned = CompletableDeferred<Unit>()
+        val releaseReconciliation = CompletableDeferred<Unit>()
+        val repository = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            beforeReconcileCommit = {
+                scanned.complete(Unit)
+                releaseReconciliation.await()
+            },
+        )
+        val reconciliation = async { repository.reconcileStartup() }
+        scanned.await()
+        val move = async { repository.moveToTrash(folder, stableId = "concurrent-move-id") }
+
+        val moveBeforeRelease = withTimeoutOrNull(1_000) { move.await() }
+        releaseReconciliation.complete(Unit)
+        reconciliation.await()
+        val entry = moveBeforeRelease ?: move.await()
+
+        assertEquals(null, moveBeforeRelease)
+        environment.paths.root.resolve("course").mkdirs()
+        environment.directoryMetadata.restoreFromTrash(entry.stableId, "course")
+        assertTrue(environment.directoryMetadata.metadata.value.getValue("course").favorite)
+    }
+
+    @Test
+    fun startupReconciliationSerializesWithRestoreAndPreservesDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(folder, stableId = "concurrent-restore-id")
+        val scanned = CompletableDeferred<Unit>()
+        val releaseReconciliation = CompletableDeferred<Unit>()
+        val repository = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            beforeReconcileCommit = {
+                scanned.complete(Unit)
+                releaseReconciliation.await()
+            },
+        )
+        val reconciliation = async { repository.reconcileStartup() }
+        scanned.await()
+        val restore = async { repository.restore(entry) }
+
+        val restoreBeforeRelease = withTimeoutOrNull(1_000) { restore.await() }
+        releaseReconciliation.complete(Unit)
+        reconciliation.await()
+        val result = restoreBeforeRelease ?: restore.await()
+
+        assertEquals(null, restoreBeforeRelease)
+        assertTrue(result is LibraryResult.Success)
+        assertTrue(folder.isDirectory)
+        assertTrue(environment.directoryMetadata.metadata.value.getValue("course").favorite)
+    }
+
+    @Test
+    fun startupReconciliationSerializesWithPermanentDeleteAndClearsDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        val entry = environment.repository.moveToTrash(folder, stableId = "concurrent-delete-id")
+        val scanned = CompletableDeferred<Unit>()
+        val releaseReconciliation = CompletableDeferred<Unit>()
+        val repository = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            beforeReconcileCommit = {
+                scanned.complete(Unit)
+                releaseReconciliation.await()
+            },
+        )
+        val reconciliation = async { repository.reconcileStartup() }
+        scanned.await()
+        val deletion = async { repository.deletePermanently(entry.stableId, confirmed = true) }
+
+        val deletionBeforeRelease = withTimeoutOrNull(1_000) { deletion.await() }
+        releaseReconciliation.complete(Unit)
+        reconciliation.await()
+        val result = deletionBeforeRelease ?: deletion.await()
+
+        assertEquals(null, deletionBeforeRelease)
+        assertTrue(result is TrashDeleteResult.Success)
+        assertFalse(environment.paths.trash.resolve(entry.stableId).exists())
+        folder.mkdirs()
+        environment.directoryMetadata.restoreFromTrash(entry.stableId, "course")
+        assertFalse("course" in environment.directoryMetadata.metadata.value)
+    }
+
+    @Test
     fun restoreCatalogFailureKeepsSidecarJournalAndSchedulesRescan() = runBlocking {
         val environment = environment()
         val source = environment.paths.root.resolve("failed.md").apply { writeText("content") }
@@ -628,32 +973,124 @@ class TrashRepositoryTest {
         assertTrue(restored.id != "legacy-entry")
     }
 
+    @Test
+    fun pendingRestoreIntentSurvivesCrashBeforeMoveAndKeepsDocumentIdentity() = runBlocking {
+        val environment = environment()
+        val source = environment.paths.root.resolve("before-move.md").apply { writeText("# before") }
+        environment.catalog.upsert(
+            DocumentEntity("before-id", "before-move.md", "before", source.lastModified(), source.length(), "hash", favorite = true),
+            source.readText(),
+            setOf("crash"),
+        )
+        val entry = environment.repository.moveToTrash(source, stableId = "before-move-entry")
+        val crashing = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            afterPendingRestoreWritten = { throw SimulatedCrash() },
+        )
+
+        try {
+            crashing.restore(entry)
+            throw AssertionError("Expected simulated process crash")
+        } catch (_: SimulatedCrash) {
+        }
+
+        assertFalse(source.exists())
+        assertTrue(entry.trashedFile.exists())
+        val restarted = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+        )
+        assertTrue(restarted.restore(restarted.listEntries().single()) is LibraryResult.Success)
+        val restored = requireNotNull(environment.catalog.getByPath("before-move.md"))
+        assertEquals("before-id", restored.id)
+        assertTrue(restored.favorite)
+        assertEquals(setOf("crash"), environment.catalog.tags(restored.id))
+    }
+
+    @Test
+    fun pendingRestoreIntentSurvivesCrashAfterMoveAndRestoresDirectoryMetadata() = runBlocking {
+        val environment = environment()
+        val folder = environment.paths.root.resolve("course").apply { mkdirs() }
+        folder.resolve("note.md").writeText("# course")
+        environment.directoryMetadata.setFavorite(setOf("course"), true)
+        environment.directoryMetadata.setTags(setOf("course"), setOf("study"))
+        val entry = environment.repository.moveToTrash(folder, stableId = "after-move-entry")
+        val crashing = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            afterRestoreMove = { throw SimulatedCrash() },
+        )
+
+        try {
+            crashing.restore(entry)
+            throw AssertionError("Expected simulated process crash")
+        } catch (_: SimulatedCrash) {
+        }
+
+        assertTrue(folder.isDirectory)
+        assertFalse(entry.trashedFile.exists())
+        val restarted = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+        )
+        assertTrue(restarted.restore(restarted.listEntries().single()) is LibraryResult.Success)
+        val metadata = environment.directoryMetadata.metadata.value.getValue("course")
+        assertTrue(metadata.favorite)
+        assertEquals(setOf("study"), metadata.tags)
+    }
+
     private fun environment(): TestEnvironment {
         val root = temporaryDirectory()
         val paths = LibraryPaths(root.resolve("library")).ensureCreated()
         val trustDirectory = root.resolve("app-private/pending-restore").toFile()
         val dao = TestCatalogDao()
         val catalog = CatalogRepository(dao, CatalogMirror(paths.system.toPath()))
+        val directoryMetadata = DirectoryMetadataRepository(paths)
         var rescanRequests = 0
         val repository = TrashRepository(
             paths,
             catalog,
             PendingRestoreTrustStore(trustDirectory),
+            directoryMetadataRepository = directoryMetadata,
         ) { rescanRequests++ }
-        return TestEnvironment(paths, trustDirectory, dao, catalog, repository) { rescanRequests }
+        return TestEnvironment(paths, trustDirectory, dao, catalog, directoryMetadata, repository) { rescanRequests }
     }
 
     private fun temporaryDirectory(): Path =
         Files.createTempDirectory("monote-trash-").also(temporaryRoots::add)
+
+    private fun blockDirectoryMetadataWrite(
+        paths: app.monote.mobile.core.storage.LibraryDirectories,
+    ): java.io.File = paths.system.resolve("directory-metadata.json.monote-tmp").apply {
+        mkdirs()
+        resolve("blocker").writeText("blocked")
+    }
+
+    private fun unblockDirectoryMetadataWrite(blocker: java.io.File) {
+        blocker.resolve("blocker").delete()
+        blocker.delete()
+    }
 
     private class TestEnvironment(
         val paths: app.monote.mobile.core.storage.LibraryDirectories,
         val trustDirectory: java.io.File,
         val dao: TestCatalogDao,
         val catalog: CatalogRepository,
+        val directoryMetadata: DirectoryMetadataRepository,
         val repository: TrashRepository,
         private val rescanCount: () -> Int,
     ) {
         val rescanRequests: Int get() = rescanCount()
     }
+
+    private class SimulatedCrash : Error("simulated process termination")
 }

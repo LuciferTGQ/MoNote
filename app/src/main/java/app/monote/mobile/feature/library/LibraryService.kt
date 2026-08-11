@@ -15,11 +15,23 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+
+fun interface LibraryFileOperations {
+    fun move(source: Path, destination: Path): Path
+}
+
+private object NioLibraryFileOperations : LibraryFileOperations {
+    override fun move(source: Path, destination: Path): Path = Files.move(source, destination)
+}
 
 class LibraryService(
     private val paths: LibraryDirectories,
     private val catalog: CatalogRepository,
+    private val directoryMetadataRepository: DirectoryMetadataRepository = DirectoryMetadataRepository(paths),
+    private val moveRecoveryRepository: MoveRecoveryStore = MoveRecoveryRepository(paths),
+    private val fileOperations: LibraryFileOperations = NioLibraryFileOperations,
     private val requestRescan: () -> Unit = {},
 ) {
     private val guard = LibraryPathGuard(paths)
@@ -39,6 +51,123 @@ class LibraryService(
             val target = guard.contentPath(destination)
             moveValidated(source, target)
         }
+    }
+
+    suspend fun moveBatch(files: List<File>, destinationDirectory: File): BatchMoveResult = withContext(Dispatchers.IO) {
+        try {
+            require(files.isNotEmpty()) { "No library items selected" }
+            val destination = guard.contentPath(destinationDirectory, allowRoot = true, requireExists = true)
+            requireRealDirectory(destination)
+            val sources = files.map { guard.contentPath(it, requireExists = true) }
+            require(sources.distinct().size == sources.size) { "Duplicate library item selected" }
+            val targets = sources.map { source ->
+                val target = guard.contentPath(destination.resolve(source.fileName).toFile())
+                if (Files.isRegularFile(source, NOFOLLOW_LINKS) && !isMarkdown(target)) {
+                    throw IllegalArgumentException("Library documents must keep a .md or .markdown extension")
+                }
+                if (Files.isDirectory(source, NOFOLLOW_LINKS) && target.startsWith(source)) {
+                    throw IllegalArgumentException("A directory cannot be moved inside itself")
+                }
+                target
+            }
+            require(targets.distinct().size == targets.size) { "Selected items have duplicate destination names" }
+            val directoryMoves = sources.zip(targets)
+                .filter { (source, _) -> Files.isDirectory(source, NOFOLLOW_LINKS) }
+                .associate { (source, target) ->
+                    guard.relativeContentPath(source) to guard.relativeContentPath(target)
+                }
+            targets.firstOrNull { Files.exists(it, NOFOLLOW_LINKS) }
+                ?.let { return@withContext BatchMoveResult.Conflict(it.toFile()) }
+
+            catalog.withScanLock {
+                val catalogStates = sources.associateWith { source ->
+                    catalogStateFor(guard.relativeContentPath(source))
+                }
+                if (catalogStates.values.any { it.readFailed }) {
+                    val error = IllegalStateException("Unable to read catalog before batch move")
+                    return@withScanLock BatchMoveResult.Failure(error.message!!, error, rolledBack = true)
+                }
+                val moved = mutableListOf<Pair<Path, Path>>()
+                try {
+                    sources.zip(targets).forEach { (source, target) ->
+                        fileOperations.move(source, target)
+                        moved += source to target
+                    }
+                    directoryMetadataRepository.movePaths(directoryMoves)
+                } catch (failure: Exception) {
+                    val recovery = rollbackMoves(moved)
+                    if (recovery.isEmpty()) {
+                        return@withScanLock BatchMoveResult.Failure(
+                            message = failure.message ?: "Batch move failed",
+                            cause = failure,
+                            rolledBack = true,
+                        )
+                    }
+                    return@withScanLock withContext(NonCancellable) {
+                        val recoveryWrite = try {
+                            moveRecoveryRepository.record(recovery)
+                        } catch (logFailure: Exception) {
+                            RecoveryWriteResult.Failed(
+                                logFailure.message ?: "Unable to persist move recovery records",
+                                logFailure,
+                            )
+                        }
+                        val persistedRecovery = when (recoveryWrite) {
+                            is RecoveryWriteResult.Recorded -> recoveryWrite.records
+                            is RecoveryWriteResult.Failed -> {
+                                if (recoveryWrite.cause !== failure) failure.addSuppressed(recoveryWrite.cause)
+                                emptyList()
+                            }
+                        }
+                        try {
+                            requestRescan()
+                        } catch (rescanFailure: Exception) {
+                            if (rescanFailure !== failure) failure.addSuppressed(rescanFailure)
+                        }
+                        BatchMoveResult.Failure(
+                            message = failure.message ?: "Batch move failed",
+                            cause = failure,
+                            rolledBack = false,
+                            recoveryRecords = persistedRecovery,
+                            recoveryPersistenceFailure = (recoveryWrite as? RecoveryWriteResult.Failed)?.message,
+                        )
+                    }
+                }
+                var synchronized = true
+                sources.zip(targets).forEach { (source, target) ->
+                    synchronized = synchronizeCatalogDuringLock(
+                        catalogStates.getValue(source).documents,
+                        source,
+                        target,
+                    ) && synchronized
+                }
+                BatchMoveResult.Success(targets.map { it.toFile() }, synchronized)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            BatchMoveResult.Failure(
+                failure.message ?: "Batch move failed",
+                failure,
+                rolledBack = true,
+            )
+        }
+    }
+
+    private fun rollbackMoves(moved: List<Pair<Path, Path>>): List<MoveRecoveryRecord> {
+        val recovery = mutableListOf<MoveRecoveryRecord>()
+        moved.asReversed().forEach { (original, current) ->
+            try {
+                fileOperations.move(current, original)
+            } catch (failure: Exception) {
+                recovery += MoveRecoveryRecord(
+                    original.toFile(),
+                    current.toFile(),
+                    failure.message ?: "Rollback failed",
+                )
+            }
+        }
+        return recovery
     }
 
     suspend fun createFolder(parent: File, name: String): LibraryResult = withContext(Dispatchers.IO) {
@@ -77,6 +206,7 @@ class LibraryService(
     }
 
     private suspend fun moveValidated(source: Path, destination: Path): LibraryResult {
+        val directory = Files.isDirectory(source, NOFOLLOW_LINKS)
         if (Files.isRegularFile(source, NOFOLLOW_LINKS) && !isMarkdown(destination)) {
             throw IllegalArgumentException("Library documents must keep a .md or .markdown extension")
         }
@@ -95,6 +225,22 @@ class LibraryService(
                 Files.move(source, destination)
             } catch (_: FileAlreadyExistsException) {
                 return@withScanLock LibraryResult.Conflict(destination.toFile())
+            }
+            if (directory) {
+                try {
+                    directoryMetadataRepository.movePaths(
+                        mapOf(
+                            guard.relativeContentPath(source) to guard.relativeContentPath(destination),
+                        ),
+                    )
+                } catch (error: Exception) {
+                    try {
+                        Files.move(destination, source)
+                    } catch (rollbackError: Exception) {
+                        error.addSuppressed(rollbackError)
+                    }
+                    throw error
+                }
             }
             val synchronized = if (knownDocuments.readFailed) {
                 requestRescan()

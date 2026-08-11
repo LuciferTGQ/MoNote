@@ -77,6 +77,11 @@ internal class TestCatalogDao : CatalogDao {
         ftsEntries.clear()
     }
 
+    override suspend fun setFavorite(documentIds: Set<String>, favorite: Boolean) {
+        failMutationIfRequested()
+        documentIds.forEach { id -> documents[id]?.let { documents[id] = it.copy(favorite = favorite) } }
+    }
+
     private fun failMutationIfRequested() {
         mutationFailure?.let { throw it }
         check(!failMutations) { "catalog mutation failed" }

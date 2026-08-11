@@ -9,6 +9,7 @@ import java.nio.file.InvalidPathException
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.time.Instant
+import java.util.UUID
 import kotlinx.serialization.Serializable
 
 sealed interface LibraryResult {
@@ -21,6 +22,31 @@ sealed interface LibraryResult {
     data class Conflict(val existing: File) : LibraryResult
     data class Failure(val message: String, val cause: Throwable) : LibraryResult
 }
+
+sealed interface BatchMoveResult {
+    data class Success(
+        val files: List<File>,
+        val catalogSynchronized: Boolean = true,
+    ) : BatchMoveResult
+
+    data class Conflict(val existing: File) : BatchMoveResult
+
+    data class Failure(
+        val message: String,
+        val cause: Throwable,
+        val rolledBack: Boolean,
+        val recoveryRecords: List<MoveRecoveryRecord> = emptyList(),
+        val recoveryPersistenceFailure: String? = null,
+    ) : BatchMoveResult
+}
+
+data class MoveRecoveryRecord(
+    val original: File,
+    val current: File,
+    val message: String,
+    val id: String = UUID.randomUUID().toString(),
+    val createdAt: Instant = Instant.now(),
+)
 
 data class TrashEntry(
     val stableId: String,
@@ -67,6 +93,8 @@ data class StorageBreakdown(
     val recoveryBytes: Long,
     val cacheBytes: Long,
     val warnings: List<String> = emptyList(),
+    val attachmentsBytes: Long = 0,
+    val backupsBytes: Long = 0,
 )
 
 @Serializable

@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -43,12 +47,32 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.monote.mobile.AppContainer
+import app.monote.mobile.LibraryServices
+import app.monote.mobile.feature.importing.DocumentSource
+import app.monote.mobile.feature.library.ClearableStorageCategory
+import app.monote.mobile.feature.library.ImportSheet
+import app.monote.mobile.feature.library.LibraryScreen
+import app.monote.mobile.feature.library.LibraryViewModel
+import app.monote.mobile.feature.library.LibraryViewModelFactory
+import app.monote.mobile.feature.library.StorageScreen
+import app.monote.mobile.feature.library.TrashScreen
+import app.monote.mobile.feature.library.restoreResultMessage
+import app.monote.mobile.feature.library.deleteResultMessage
 import app.monote.mobile.feature.onboarding.PermissionScreen
 import app.monote.mobile.feature.onboarding.PermissionViewModel
 import app.monote.mobile.ui.SplashGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import java.io.File
+import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.FileVisitResult
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 
 @Composable
 fun MoNoteApp(
@@ -58,6 +82,7 @@ fun MoNoteApp(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val granted by permissionViewModel.granted.collectAsStateWithLifecycle()
+    var services by remember { mutableStateOf<LibraryServices?>(null) }
 
     DisposableEffect(lifecycleOwner, permissionViewModel) {
         val observer = LifecycleEventObserver { _, event ->
@@ -71,9 +96,10 @@ fun MoNoteApp(
         if (granted) {
             AuthorizedShell(
                 initializeLibrary = {
-                    withContext(Dispatchers.IO) { appContainer.libraryServices() }
+                    services = withContext(Dispatchers.IO) { appContainer.libraryServices() }
                 },
                 onPermissionLost = permissionViewModel::refresh,
+                readyContent = { services?.let { NavigationShell(it) } ?: InitializationLoading() },
             )
         } else {
             PermissionScreen(
@@ -88,6 +114,7 @@ fun MoNoteApp(
 internal fun AuthorizedShell(
     initializeLibrary: suspend () -> Unit,
     onPermissionLost: () -> Unit,
+    readyContent: @Composable () -> Unit = { NavigationShell() },
 ) {
     var attempt by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf(InitializationState.Loading) }
@@ -111,7 +138,7 @@ internal fun AuthorizedShell(
 
     when (state) {
         InitializationState.Loading -> InitializationLoading()
-        InitializationState.Ready -> NavigationShell()
+        InitializationState.Ready -> readyContent()
         InitializationState.Failed -> InitializationError(onRetry = { attempt += 1 })
     }
 }
@@ -171,7 +198,7 @@ internal fun launchAllFilesAccessSettings(
 }
 
 @Composable
-private fun NavigationShell() {
+private fun NavigationShell(services: LibraryServices? = null) {
     val navController = rememberNavController()
     val currentEntry by navController.currentBackStackEntryAsState()
     val currentPath = currentEntry?.destination?.route
@@ -202,13 +229,218 @@ private fun NavigationShell() {
             startDestination = Route.Library.path,
             modifier = Modifier.padding(padding),
         ) {
-            Route.entries.forEach { route ->
-                composable(route.path) {
-                    PlaceholderDestination(route)
+            composable(Route.Library.path) {
+                if (services == null) PlaceholderDestination(Route.Library) else Box(Modifier.fillMaxSize().testTag("route-library")) {
+                    LibraryDestination(services, onOpenEditor = { navController.navigate(Route.Editor.path) }, onOpenStorage = { navController.navigate(Route.Storage.path) }, onOpenSettings = { navController.navigate(Route.Settings.path) })
                 }
+            }
+            composable(Route.Trash.path) {
+                if (services == null) PlaceholderDestination(Route.Trash) else TrashDestination(services)
+            }
+            composable(Route.Storage.path) {
+                if (services == null) PlaceholderDestination(Route.Storage) else StorageDestination(services)
+            }
+            composable(Route.Editor.path) { PlaceholderDestination(Route.Editor) }
+            composable(Route.Settings.path) { PlaceholderDestination(Route.Settings) }
+        }
+    }
+}
+
+@Composable
+private fun LibraryDestination(
+    services: LibraryServices,
+    onOpenEditor: () -> Unit,
+    onOpenStorage: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val model: LibraryViewModel = viewModel(factory = LibraryViewModelFactory {
+        LibraryViewModel(services.paths, services.catalogRepository, services.libraryIndexer, services.libraryService, services.importCoordinator, services.trashRepository, services.folderImportCoordinator, services.directoryMetadataRepository, services.moveRecoveryRepository)
+    })
+    val state by model.uiState.collectAsStateWithLifecycle()
+    var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var selectedUriMetadata by remember { mutableStateOf<List<ResolvedUriMetadata>>(emptyList()) }
+    var selectedTree by remember { mutableStateOf<Uri?>(null) }
+    var selectedTreeMetadata by remember { mutableStateOf<ResolvedUriMetadata?>(null) }
+    var folderImporting by remember { mutableStateOf(false) }
+    var exportFile by remember { mutableStateOf<File?>(null) }
+    val importFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        selectedTree = null
+        selectedTreeMetadata = null
+        selectedUris = uris
+        selectedUriMetadata = emptyList()
+    }
+    val importFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        selectedUris = emptyList()
+        selectedUriMetadata = emptyList()
+        selectedTree = uri
+        selectedTreeMetadata = null
+        folderImporting = false
+        model.clearError()
+    }
+    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        val source = exportFile
+        exportFile = null
+        if (uri != null && source != null) scope.launch {
+            try {
+                exportMarkdown(source) { context.contentResolver.openOutputStream(uri) }
+            } catch (failure: Exception) {
+                model.reportError("导出失败：${failure.message ?: "未知错误"}")
             }
         }
     }
+    LaunchedEffect(selectedUris) {
+        selectedUriMetadata = if (selectedUris.isEmpty()) emptyList()
+        else selectedUris.map { resolveUriMetadata(context, it) }
+    }
+    LaunchedEffect(selectedTree) {
+        selectedTreeMetadata = selectedTree?.let { resolveUriMetadata(context, it) }
+    }
+    BackHandler(enabled = state.canNavigateUp) { model.goToParent() }
+    LibraryScreen(
+        state = state,
+        onQueryChange = model::updateQuery,
+        onOpenItem = { if (it.isFolder) model.openFolder(it.file) else onOpenEditor() },
+        onOpenStorage = onOpenStorage,
+        onOpenSettings = onOpenSettings,
+        onNavigateUp = model::goToParent,
+        onImportDocuments = { importFiles.launch(arrayOf("text/markdown", "text/plain", "application/octet-stream")) },
+        onImportFolder = { importFolder.launch(null) },
+        onCreateNote = model::createNote,
+        onCreateFolder = model::createFolder,
+        onSelectionChange = model::updateSelection,
+        onFavorite = model::toggleFavorite,
+        onTags = model::setTags,
+        onMove = { _, destination -> model.moveSelected(destination) },
+        onRename = model::renameSelected,
+        onExport = { ids ->
+            state.items.singleOrNull { it.id in ids && !it.isFolder }?.let { file ->
+                exportFile = file.file
+                export.launch(file.displayName)
+            }
+        },
+        onDelete = { model.deleteSelected() },
+        onRecoverMove = model::recoverMove,
+    )
+    if (selectedUris.isNotEmpty() && selectedUriMetadata.size == selectedUris.size) {
+        ImportSheet(selectedUriMetadata.map { it.displayName }, state.currentFolder.relativeTo(services.paths.root).path.ifBlank { "MoNote" }, onDismiss = {
+            selectedUris = emptyList()
+            selectedUriMetadata = emptyList()
+        }) {
+            val sources = selectedUris.zip(selectedUriMetadata).map { (uri, metadata) -> ContentResolverDocumentSource(context, uri, metadata) }
+            selectedUris = emptyList()
+            selectedUriMetadata = emptyList()
+            model.importDocuments(sources) { onOpenEditor() }
+        }
+    }
+    selectedTree?.let { tree -> selectedTreeMetadata?.let { treeMetadata ->
+        LaunchedEffect(state.error) {
+            if (state.error != null) folderImporting = false
+        }
+        ImportSheet(
+            selectedNames = listOf(treeMetadata.displayName),
+            targetDirectory = state.currentFolder.relativeTo(services.paths.root).path.ifBlank { "MoNote" },
+            warning = "将安全复制包含 Markdown 的目录结构和附件；超出大小或深度限制时会停止并清理。",
+            isFolder = true,
+            error = state.error,
+            confirming = folderImporting,
+            onDismiss = { if (!folderImporting) selectedTree = null },
+            onConfirm = {
+                folderImporting = true
+                model.importFolder(ContentResolverTreeDocumentSource(context, tree, treeMetadata.displayName)) {
+                    folderImporting = false
+                    selectedTree = null
+                    onOpenEditor()
+                }
+            },
+        )
+    } }
+}
+
+@Composable
+private fun TrashDestination(services: LibraryServices) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var entries by remember { mutableStateOf(emptyList<app.monote.mobile.feature.library.TrashEntry>()) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun refresh() { scope.launch { runCatching { services.trashRepository.listEntries() }.onSuccess { entries = it }.onFailure { error = it.message } } }
+    LaunchedEffect(services) { refresh() }
+    TrashScreen(
+        entries,
+        onRestore = { entry -> scope.launch {
+            error = try { restoreResultMessage(services.trashRepository.restore(entry)) } catch (failure: Exception) { "恢复失败：${failure.message ?: "未知错误"}" }
+            refresh()
+        } },
+        onDeletePermanently = { id -> scope.launch {
+            error = try { deleteResultMessage(services.trashRepository.deletePermanently(id, true), "永久删除") } catch (failure: Exception) { "永久删除失败：${failure.message ?: "未知错误"}" }
+            refresh()
+        } },
+        onEmptyTrash = { scope.launch {
+            error = try { deleteResultMessage(services.trashRepository.emptyTrash(true), "清空回收站") } catch (failure: Exception) { "清空回收站失败：${failure.message ?: "未知错误"}" }
+            refresh()
+        } },
+        error = error,
+    )
+}
+
+@Composable
+private fun StorageDestination(services: LibraryServices) {
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var breakdown by remember { mutableStateOf<app.monote.mobile.feature.library.StorageBreakdown?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun measure() {
+        scope.launch {
+            try {
+                breakdown = withContext(Dispatchers.IO) { services.storageInspector.measure() }
+                error = null
+            } catch (failure: Exception) {
+                error = "存储统计失败：${failure.message ?: "未知错误"}"
+            }
+        }
+    }
+    LaunchedEffect(services) { measure() }
+    StorageScreen(
+        breakdown = breakdown,
+        onOpenRoot = { launchLibraryRoot(context) },
+        onClear = { category ->
+            scope.launch {
+                try {
+                    breakdown = withContext(Dispatchers.IO) {
+                        clearDirectoryContents(
+                            if (category == ClearableStorageCategory.RecoveryDrafts) services.paths.recovery
+                            else context.cacheDir.resolve("renderer"),
+                        )
+                        services.storageInspector.measure()
+                    }
+                    error = null
+                } catch (failure: Exception) {
+                    error = "清理失败：${failure.message ?: "未知错误"}"
+                }
+            }
+        },
+        error = error,
+    )
+}
+
+private class ContentResolverDocumentSource(
+    private val context: Context,
+    private val uri: Uri,
+    metadata: ResolvedUriMetadata,
+) : DocumentSource {
+    override val displayName: String = metadata.displayName
+    override val mimeType: String? = metadata.mimeType
+    override suspend fun open(): InputStream = context.contentResolver.openInputStream(uri)
+        ?: throw java.io.IOException("无法读取所选文件：$displayName")
+}
+
+private fun clearDirectoryContents(directory: File) {
+    val root = directory.toPath().toAbsolutePath().normalize()
+    if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(root)) return
+    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+        override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult { if (!Files.isSymbolicLink(file)) Files.deleteIfExists(file); return FileVisitResult.CONTINUE }
+        override fun postVisitDirectory(dir: Path, error: java.io.IOException?): FileVisitResult { if (dir != root && error == null && !Files.isSymbolicLink(dir)) Files.deleteIfExists(dir); return FileVisitResult.CONTINUE }
+    })
 }
 
 @Composable

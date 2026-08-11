@@ -20,6 +20,8 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,7 +30,11 @@ class TrashRepository(
     private val paths: LibraryDirectories,
     private val catalog: CatalogRepository,
     private val pendingRestoreTrustStore: PendingRestoreTrustStore,
+    private val directoryMetadataRepository: DirectoryMetadataRepository = DirectoryMetadataRepository(paths),
     private val textStore: AtomicTextStore = AtomicTextStore(),
+    private val beforeReconcileCommit: suspend () -> Unit = {},
+    private val afterPendingRestoreWritten: suspend () -> Unit = {},
+    private val afterRestoreMove: suspend () -> Unit = {},
     private val requestRescan: () -> Unit = {},
 ) {
     private val guard = LibraryPathGuard(paths)
@@ -38,15 +44,25 @@ class TrashRepository(
         ignoreUnknownKeys = true
         prettyPrint = true
     }
+    private val transactionMutex = Mutex()
 
     suspend fun moveToTrash(
         source: File,
         now: Instant = Instant.now(),
         stableId: String? = null,
     ): TrashEntry = withContext(Dispatchers.IO) {
-        catalog.withScanLock {
+        transactionMutex.withLock { moveToTrashLocked(source, now, stableId) }
+    }
+
+    private suspend fun moveToTrashLocked(
+        source: File,
+        now: Instant,
+        stableId: String?,
+    ): TrashEntry {
+        return catalog.withScanLock {
             val sourcePath = guard.contentPath(source, requireExists = true)
             val originalRelativePath = guard.relativeContentPath(sourcePath)
+            val sourceIsDirectory = Files.isDirectory(sourcePath, NOFOLLOW_LINKS)
             val catalogState = readCatalogState(sourcePath, originalRelativePath)
             catalogState.readFailure?.let { error ->
                 requestRescan()
@@ -57,6 +73,7 @@ class TrashRepository(
             val trashedPath = guard.trashContentPath(entryId, originalRelativePath)
             val metadataFile = entryRoot.resolve(METADATA_FILE_NAME).toFile()
             var contentMoved = false
+            var directoryMetadataMoved = false
 
             try {
                 Files.createDirectory(entryRoot)
@@ -75,10 +92,34 @@ class TrashRepository(
                 )
                 Files.move(sourcePath, trashedPath)
                 contentMoved = true
+                if (sourceIsDirectory) {
+                    directoryMetadataRepository.moveToTrash(originalRelativePath, entryId)
+                    directoryMetadataMoved = true
+                }
             } catch (error: CancellationException) {
+                if (contentMoved) {
+                    contentMoved = !rollBackFailedTrashMove(
+                        sourcePath,
+                        trashedPath,
+                        originalRelativePath,
+                        entryId,
+                        directoryMetadataMoved,
+                        error,
+                    )
+                }
                 if (!contentMoved) cleanUpFailedEntry(entryRoot, error)
                 throw error
             } catch (error: Exception) {
+                if (contentMoved) {
+                    contentMoved = !rollBackFailedTrashMove(
+                        sourcePath,
+                        trashedPath,
+                        originalRelativePath,
+                        entryId,
+                        directoryMetadataMoved,
+                        error,
+                    )
+                }
                 if (!contentMoved) cleanUpFailedEntry(entryRoot, error)
                 throw error
             }
@@ -98,8 +139,15 @@ class TrashRepository(
     }
 
     suspend fun listEntries(): List<TrashEntry> = withContext(Dispatchers.IO) {
+        transactionMutex.withLock { listEntriesLocked() }
+    }
+
+    private suspend fun listEntriesLocked(): List<TrashEntry> {
         val trash = paths.trash.toPath()
-        if (!Files.isDirectory(trash, NOFOLLOW_LINKS) || Files.isSymbolicLink(trash)) return@withContext emptyList()
+        if (!Files.isDirectory(trash, NOFOLLOW_LINKS) || Files.isSymbolicLink(trash)) {
+            directoryMetadataRepository.reconcileTrashed(emptySet())
+            return emptyList()
+        }
         val entries = mutableListOf<TrashEntry>()
         Files.list(trash).use { children ->
             children.forEach { child ->
@@ -108,46 +156,110 @@ class TrashRepository(
                 }
             }
         }
-        entries.sortedWith(compareByDescending<TrashEntry> { it.deletedAt }.thenBy { it.stableId })
+        reconcileDirectoryMetadataLocked()
+        return entries.sortedWith(compareByDescending<TrashEntry> { it.deletedAt }.thenBy { it.stableId })
+    }
+
+    suspend fun reconcileStartup() = withContext(Dispatchers.IO) {
+        transactionMutex.withLock { reconcileDirectoryMetadataLocked() }
     }
 
     suspend fun restore(entry: TrashEntry): LibraryResult = withContext(Dispatchers.IO) {
+        transactionMutex.withLock { restoreLocked(entry) }
+    }
+
+    private suspend fun restoreLocked(entry: TrashEntry): LibraryResult {
         try {
             val stored = parseEntry(guard.trashEntryRoot(entry.stableId))
-                ?: return@withContext LibraryResult.Failure(
+                ?: return LibraryResult.Failure(
                     "Trash entry is missing or invalid: ${entry.stableId}",
                     IllegalArgumentException("Invalid trash metadata"),
                 )
-            val pending = if (stored.state == TrashEntryState.PENDING_RESTORE) {
-                stored
-            } else {
-                val destination = guard.contentPath(paths.root.resolve(stored.originalRelativePath))
-                if (Files.exists(destination, NOFOLLOW_LINKS)) {
-                    return@withContext LibraryResult.Conflict(destination.toFile())
+            val destination = guard.contentPath(paths.root.resolve(stored.originalRelativePath))
+            val parent = destination.parent ?: throw IllegalArgumentException("Restore target has no parent")
+            guard.contentPath(parent.toFile(), allowRoot = true)
+            Files.createDirectories(parent)
+            guard.contentPath(parent.toFile(), allowRoot = true, requireExists = true)
+
+            val trashedPath = stored.trashedFile.toPath()
+            val destinationExists = Files.exists(destination, NOFOLLOW_LINKS)
+            val trashExists = Files.exists(trashedPath, NOFOLLOW_LINKS)
+            val pending = when {
+                stored.state == TrashEntryState.TRASHED -> {
+                    if (destinationExists) return LibraryResult.Conflict(destination.toFile())
+                    val documents = snapshotRestoredDocuments(stored, trashedPath)
+                    writePendingRestore(stored, destination, documents).also {
+                        afterPendingRestoreWritten()
+                    }
                 }
-                val parent = destination.parent ?: throw IllegalArgumentException("Restore target has no parent")
-                guard.contentPath(parent.toFile(), allowRoot = true)
-                Files.createDirectories(parent)
-                guard.contentPath(parent.toFile(), allowRoot = true, requireExists = true)
-                try {
-                    Files.move(stored.trashedFile.toPath(), destination)
-                } catch (_: FileAlreadyExistsException) {
-                    return@withContext LibraryResult.Conflict(destination.toFile())
+
+                stored.pendingRestoreTrusted -> stored
+
+                trashExists && !destinationExists -> {
+                    // A public/legacy sidecar cannot confer catalog identity. Rebuild a
+                    // private pending intent from the actual trash content instead.
+                    val documents = snapshotRestoredDocuments(stored.copy(documents = emptyList()), trashedPath)
+                    writePendingRestore(stored, destination, documents).also {
+                        afterPendingRestoreWritten()
+                    }
                 }
-                try {
-                    val documents = snapshotRestoredDocuments(stored, destination)
-                    writePendingRestore(stored, destination, documents)
-                } catch (error: Exception) {
+
+                destinationExists && !trashExists -> {
+                    // A forged pending sidecar may point at an active file. Treat the
+                    // content as already present, but do not trust any supplied metadata.
+                    stored.copy(documents = emptyList(), pendingRestoreTrusted = false)
+                }
+
+                else -> stored
+            }
+            if (destinationExists && trashExists) return LibraryResult.Conflict(destination.toFile())
+            if (!destinationExists && !trashExists) {
+                return LibraryResult.Failure(
+                    "Pending restore content is missing: ${pending.stableId}",
+                    IOException("Neither trash nor destination content exists"),
+                )
+            }
+
+            var movedNow = false
+            var directoryMetadataRestored = false
+            try {
+                if (!destinationExists) {
                     try {
-                        Files.move(destination, stored.trashedFile.toPath())
+                        Files.move(trashedPath, destination)
+                    } catch (_: FileAlreadyExistsException) {
+                        rollbackPendingRestore(pending)
+                        return LibraryResult.Conflict(destination.toFile())
+                    }
+                    movedNow = true
+                    afterRestoreMove()
+                }
+                if (pending.pendingRestoreTrusted && !verifyPendingDocuments(destination, pending.documents)) {
+                    throw IOException("Restored content no longer matches the pending journal")
+                }
+                if (Files.isDirectory(destination, NOFOLLOW_LINKS)) {
+                    directoryMetadataRepository.restoreFromTrash(
+                        pending.stableId,
+                        pending.originalRelativePath,
+                    )
+                    directoryMetadataRestored = true
+                }
+            } catch (error: Exception) {
+                if (movedNow) {
+                    try {
+                        Files.move(destination, trashedPath)
+                        if (directoryMetadataRestored) {
+                            directoryMetadataRepository.moveToTrash(
+                                pending.originalRelativePath,
+                                pending.stableId,
+                            )
+                        }
+                        rollbackPendingRestore(pending)
                     } catch (rollbackError: Exception) {
                         error.addSuppressed(rollbackError)
                     }
-                    throw error
                 }
+                throw error
             }
-            val destination = pending.pendingTargetFile?.toPath()
-                ?: throw IllegalStateException("Pending restore target is missing")
 
             val catalogSynchronized = synchronizeRestoredContent(pending, destination)
             val warnings = mutableListOf<String>()
@@ -161,30 +273,34 @@ class TrashRepository(
             } else {
                 warnings += "Catalog synchronization failed; trash journal retained"
             }
-            LibraryResult.Success(destination.toFile(), catalogSynchronized, warnings)
+            return LibraryResult.Success(destination.toFile(), catalogSynchronized, warnings)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            LibraryResult.Failure(error.message ?: "Unable to restore trash entry", error)
+            return LibraryResult.Failure(error.message ?: "Unable to restore trash entry", error)
         }
     }
 
     suspend fun deletePermanently(stableId: String, confirmed: Boolean): TrashDeleteResult =
         withContext(Dispatchers.IO) {
-            if (!confirmed) return@withContext TrashDeleteResult.ConfirmationRequired
-            try {
-                val entryRoot = guard.trashEntryRoot(stableId)
-                if (!Files.exists(entryRoot, NOFOLLOW_LINKS)) {
-                    TrashDeleteResult.NotFound(stableId)
-                } else {
-                    pendingRestoreTrustStore.remove(stableId)
-                    deleteTree(entryRoot)
-                    TrashDeleteResult.Success(setOf(stableId))
+            transactionMutex.withLock {
+                if (!confirmed) return@withLock TrashDeleteResult.ConfirmationRequired
+                try {
+                    val entryRoot = guard.trashEntryRoot(stableId)
+                    if (!Files.exists(entryRoot, NOFOLLOW_LINKS)) {
+                        reconcileDirectoryMetadataLocked()
+                        TrashDeleteResult.NotFound(stableId)
+                    } else {
+                        pendingRestoreTrustStore.remove(stableId)
+                        deleteTree(entryRoot)
+                        reconcileDirectoryMetadataLocked()
+                        TrashDeleteResult.Success(setOf(stableId))
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    TrashDeleteResult.Failure(error.message ?: "Unable to delete trash entry", error)
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                TrashDeleteResult.Failure(error.message ?: "Unable to delete trash entry", error)
             }
         }
 
@@ -192,45 +308,59 @@ class TrashRepository(
         now: Instant = Instant.now(),
         confirmed: Boolean,
     ): TrashDeleteResult = withContext(Dispatchers.IO) {
-        if (!confirmed) return@withContext TrashDeleteResult.ConfirmationRequired
-        val cutoff = now.minus(RETENTION)
-        deleteEntries(
-            listEntries().filter {
-                it.state == TrashEntryState.TRASHED && it.deletedAt.isBefore(cutoff)
-            },
-        )
-    }
-
-    suspend fun emptyTrash(confirmed: Boolean): TrashDeleteResult = withContext(Dispatchers.IO) {
-        if (!confirmed) return@withContext TrashDeleteResult.ConfirmationRequired
-        val trash = paths.trash.toPath()
-        if (!Files.isDirectory(trash, NOFOLLOW_LINKS)) return@withContext TrashDeleteResult.Success(emptySet())
-        try {
-            val deleted = linkedSetOf<String>()
-            Files.list(trash).use { children ->
-                children.forEach { child ->
-                    try {
-                        pendingRestoreTrustStore.remove(child.fileName.toString())
-                    } catch (_: IllegalArgumentException) {
-                        // Malformed trash children cannot have a valid private trust marker.
-                    }
-                    if (Files.isSymbolicLink(child)) {
-                        Files.delete(child)
-                    } else {
-                        deleteTree(child)
-                    }
-                    deleted += child.fileName.toString()
-                }
-            }
-            TrashDeleteResult.Success(deleted)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            TrashDeleteResult.Failure(error.message ?: "Unable to empty trash", error)
+        transactionMutex.withLock {
+            if (!confirmed) return@withLock TrashDeleteResult.ConfirmationRequired
+            val cutoff = now.minus(RETENTION)
+            deleteEntriesLocked(
+                listEntriesLocked().filter {
+                    it.state == TrashEntryState.TRASHED && it.deletedAt.isBefore(cutoff)
+                },
+            )
         }
     }
 
-    private suspend fun deleteEntries(entries: List<TrashEntry>): TrashDeleteResult {
+    suspend fun emptyTrash(confirmed: Boolean): TrashDeleteResult = withContext(Dispatchers.IO) {
+        transactionMutex.withLock {
+            if (!confirmed) return@withLock TrashDeleteResult.ConfirmationRequired
+            val trash = paths.trash.toPath()
+            if (!Files.isDirectory(trash, NOFOLLOW_LINKS) || Files.isSymbolicLink(trash)) {
+                return@withLock try {
+                    directoryMetadataRepository.reconcileTrashed(emptySet())
+                    TrashDeleteResult.Success(emptySet())
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    TrashDeleteResult.Failure(error.message ?: "Unable to empty trash", error)
+                }
+            }
+            try {
+                val deleted = linkedSetOf<String>()
+                Files.list(trash).use { children ->
+                    children.forEach { child ->
+                        try {
+                            pendingRestoreTrustStore.remove(child.fileName.toString())
+                        } catch (_: IllegalArgumentException) {
+                            // Malformed trash children cannot have a valid private trust marker.
+                        }
+                        if (Files.isSymbolicLink(child)) {
+                            Files.delete(child)
+                        } else {
+                            deleteTree(child)
+                        }
+                        deleted += child.fileName.toString()
+                    }
+                }
+                reconcileDirectoryMetadataLocked()
+                TrashDeleteResult.Success(deleted)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                TrashDeleteResult.Failure(error.message ?: "Unable to empty trash", error)
+            }
+        }
+    }
+
+    private suspend fun deleteEntriesLocked(entries: List<TrashEntry>): TrashDeleteResult {
         return try {
             val deleted = linkedSetOf<String>()
             entries.forEach { entry ->
@@ -238,6 +368,7 @@ class TrashRepository(
                 deleteTree(guard.trashEntryRoot(entry.stableId))
                 deleted += entry.stableId
             }
+            reconcileDirectoryMetadataLocked()
             TrashDeleteResult.Success(deleted)
         } catch (error: CancellationException) {
             throw error
@@ -274,12 +405,15 @@ class TrashRepository(
                     val pendingRelative = metadata.pendingTargetRelativePath ?: return null
                     val pendingPath = guard.contentPath(
                         paths.root.resolve(pendingRelative),
-                        requireExists = true,
+                        requireExists = false,
                     )
                     val normalizedPendingRelative = guard.relativeContentPath(pendingPath)
                     if (normalizedPendingRelative != pendingRelative.replace('\\', '/')) return null
                     if (normalizedPendingRelative != normalizedRelative) return null
-                    if (!verifyPendingDocuments(pendingPath, metadata.documents)) return null
+                    val destinationExists = Files.exists(pendingPath, NOFOLLOW_LINKS)
+                    val trashExists = Files.exists(trashedFile.toPath(), NOFOLLOW_LINKS)
+                    if (!destinationExists && !trashExists) return null
+                    if (destinationExists && !verifyPendingDocuments(pendingPath, metadata.documents)) return null
                     pendingRestoreTrusted = pendingRestoreTrustStore.matches(
                         stableId,
                         json.encodeToString(metadata),
@@ -306,11 +440,18 @@ class TrashRepository(
 
     private fun snapshotRestoredDocuments(
         entry: TrashEntry,
-        destination: Path,
+        contentRoot: Path,
     ): List<TrashDocumentMetadata> {
         val existing = entry.documents.associateBy { it.originalRelativePath }
-        val files = markdownFiles(destination).map { file ->
-            file to guard.relativeContentPath(file)
+        val originalRoot = guard.contentPath(paths.root.resolve(entry.originalRelativePath))
+        val contentIsDirectory = Files.isDirectory(contentRoot, NOFOLLOW_LINKS)
+        val files = markdownFiles(contentRoot).map { file ->
+            val restoredPath = if (contentIsDirectory) {
+                originalRoot.resolve(contentRoot.relativize(file))
+            } else {
+                originalRoot
+            }
+            file to guard.relativeContentPath(restoredPath)
         }
         return snapshotTrashDocuments(files, existing)
     }
@@ -366,6 +507,19 @@ class TrashRepository(
             pendingTargetFile = destination.toFile(),
             pendingRestoreTrusted = true,
         )
+    }
+
+    private fun rollbackPendingRestore(entry: TrashEntry) {
+        val trashed = TrashMetadata(
+            stableId = entry.stableId,
+            originalRelativePath = entry.originalRelativePath,
+            deletedAt = entry.deletedAt.toString(),
+            documents = entry.documents,
+            state = TrashEntryState.TRASHED,
+            pendingTargetRelativePath = null,
+        )
+        textStore.replace(entry.metadataFile, json.encodeToString(trashed))
+        pendingRestoreTrustStore.remove(entry.stableId)
     }
 
     private fun verifyPendingDocuments(
@@ -557,6 +711,24 @@ class TrashRepository(
         ?.takeIf(String::isNotBlank)
         ?: file.fileName.toString().substringBeforeLast('.')
 
+    private suspend fun rollBackFailedTrashMove(
+        source: Path,
+        trashed: Path,
+        originalRelativePath: String,
+        stableId: String,
+        directoryMetadataMoved: Boolean,
+        original: Throwable,
+    ): Boolean = try {
+        Files.move(trashed, source)
+        if (directoryMetadataMoved) {
+            directoryMetadataRepository.restoreFromTrash(stableId, originalRelativePath)
+        }
+        true
+    } catch (rollback: Exception) {
+        original.addSuppressed(rollback)
+        false
+    }
+
     private fun cleanUpFailedEntry(entryRoot: Path, original: Throwable) {
         try {
             if (Files.exists(entryRoot, NOFOLLOW_LINKS)) deleteTree(entryRoot)
@@ -578,6 +750,25 @@ class TrashRepository(
                 return FileVisitResult.CONTINUE
             }
         })
+    }
+
+    private suspend fun reconcileDirectoryMetadataLocked() {
+        val trash = paths.trash.toPath()
+        val actualStableIds = if (!Files.isDirectory(trash, NOFOLLOW_LINKS) || Files.isSymbolicLink(trash)) {
+            emptySet()
+        } else {
+            val stableIds = linkedSetOf<String>()
+            Files.list(trash).use { children ->
+                children.forEach { child ->
+                    if (Files.isDirectory(child, NOFOLLOW_LINKS) && !Files.isSymbolicLink(child)) {
+                        parseEntry(child)?.let { entry -> stableIds += entry.stableId }
+                    }
+                }
+            }
+            stableIds
+        }
+        beforeReconcileCommit()
+        directoryMetadataRepository.reconcileTrashed(actualStableIds)
     }
 
     private data class CatalogRemovalState(

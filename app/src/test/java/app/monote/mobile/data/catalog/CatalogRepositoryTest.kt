@@ -108,5 +108,6 @@ class CatalogRepositoryTest {
         override suspend fun deleteDocument(documentId: String) = Unit
         override suspend fun deleteAllDocuments() = Unit
         override suspend fun deleteAllFts() = Unit
+        override suspend fun setFavorite(documentIds: Set<String>, favorite: Boolean) = Unit
     }
 }
