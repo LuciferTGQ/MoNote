@@ -37,7 +37,14 @@ Every completed implementation task is kept as an independent commit. A task is
 pushed only after specification review, code-quality review, and fresh
 verification succeed. In-progress task code is not a rollback checkpoint.
 
+## In-progress recovery checkpoints
+
+| Stage | Commit | Completed and remaining work |
+| --- | --- | --- |
+| 12.3. Review reading experience core | `d10c32d` | Implemented versioned reading state, legacy-ID migration, heading bookmarks, strict native/renderer messages, ATX/Setext outline extraction, source and preview search, heading navigation, reading-position reporting, immersive UI, stable IDs after import, and permanent-delete cleanup. Renderer production build and all 89 renderer tests passed; focused reading/bridge/trash JVM tests and Android test compilation passed. Renderer asset sync, API 30 UI execution, full JVM/lint/APK verification, device acceptance, and final release checkpoint remain. |
+
 ## Current work
 
-- Task 13: image assets, export/share, recovery UI, and external-conflict UI - next
-  implementation checkpoint.
+- Finish Task 12.3 verification and APK/device acceptance from `d10c32d`.
+- Then resume Task 13: image assets, export/share, recovery UI, and
+  external-conflict UI.
