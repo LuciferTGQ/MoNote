@@ -64,6 +64,21 @@ class ReadingStateRepositoryTest {
     }
 
     @Test
+    fun duplicateHeadingInsertionDoesNotSilentlyReuseAnOldOccurrenceId() = runTest {
+        val saved = listOf(HeadingBookmark("repeat-2", "重复", 2, 50))
+        val current = listOf(
+            DocumentHeading("repeat-2", "重复", 2, 10),
+            DocumentHeading("repeat-3", "重复", 2, 52),
+        )
+
+        val resolved = reconcileHeadingBookmarks(saved, current)
+
+        assertTrue(resolved.single().available)
+        assertEquals("repeat-3", resolved.single().bookmark.id)
+        assertEquals(52, resolved.single().bookmark.sourceLine)
+    }
+
+    @Test
     fun capacityPrefersEvictingOldestStateWithoutBookmarks() = runTest {
         val fixture = fixture(maxDocuments = 2)
         fixture.repository.replace(

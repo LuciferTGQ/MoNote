@@ -191,8 +191,20 @@ body {
 }
 
 .document-surface[data-mode="edit"] .preview-pane,
-.document-surface[data-mode="preview"] .editor-pane {
+.document-surface[data-mode="preview"] .editor-pane,
+.document-surface[data-mode="read"] .editor-pane {
   display: none;
+}
+
+.markdown-body mark[data-monote-search] {
+  padding: 0;
+  color: inherit;
+  background: #ffe58f;
+}
+
+.markdown-body mark[data-monote-search-current="true"] {
+  color: #fff;
+  background: #b45f06;
 }
 
 .document-surface[data-mode="split"] {

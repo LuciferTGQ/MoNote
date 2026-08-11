@@ -60,6 +60,42 @@ describe("bridge protocol", () => {
         }),
       ),
     ).toEqual({ type: "setPreviewPolicy", largeDocument: "live" })
+    expect(
+      parseNativeMessage(
+        JSON.stringify({
+          type: "searchDocument",
+          query: "复习",
+          action: "next",
+        }),
+      ),
+    ).toEqual({ type: "searchDocument", query: "复习", action: "next" })
+    expect(
+      parseNativeMessage(
+        JSON.stringify({ type: "navigateToHeading", headingId: "heading-1" }),
+      ),
+    ).toEqual({ type: "navigateToHeading", headingId: "heading-1" })
+    expect(
+      parseNativeMessage(
+        JSON.stringify({
+          type: "restoreReadingPosition",
+          editorLine: 8,
+          editorColumn: 3,
+          editorProgress: 0.25,
+          previewHeadingId: "heading-1",
+          previewProgress: 0.5,
+        }),
+      ),
+    ).toEqual({
+      type: "restoreReadingPosition",
+      editorLine: 8,
+      editorColumn: 3,
+      editorProgress: 0.25,
+      previewHeadingId: "heading-1",
+      previewProgress: 0.5,
+    })
+    expect(
+      parseNativeMessage(JSON.stringify({ type: "setMode", mode: "read" })),
+    ).toEqual({ type: "setMode", mode: "read" })
   })
 
   it.each([
@@ -77,6 +113,10 @@ describe("bridge protocol", () => {
     '{"type":"setFontSize","pixels":17}',
     '{"type":"refreshPreview","revision":"4"}',
     '{"type":"setPreviewPolicy","largeDocument":"always"}',
+    `{"type":"searchDocument","query":"${"x".repeat(257)}","action":"reset"}`,
+    '{"type":"searchDocument","query":"x","action":"again"}',
+    '{"type":"navigateToHeading","headingId":""}',
+    '{"type":"restoreReadingPosition","editorLine":0,"editorColumn":0,"editorProgress":0,"previewHeadingId":null,"previewProgress":0}',
   ])("rejects malformed or unknown native message %s", (raw) => {
     expect(parseNativeMessage(raw)).toBeNull()
   })
@@ -93,6 +133,49 @@ describe("bridge protocol", () => {
     expect(encodeWebMessage(message)).toBe(
       '{"type":"changed","revision":7,"text":"# 墨笺","canUndo":true,"canRedo":false}',
     )
+  })
+
+  it("accepts bounded reading events from the renderer", () => {
+    const messages: WebMessage[] = [
+      {
+        type: "outlineChanged",
+        headings: [{ id: "heading-1", title: "第一章", level: 1, sourceLine: 1 }],
+      },
+      { type: "searchResult", current: 1, total: 3 },
+      { type: "activeHeadingChanged", headingId: "heading-1" },
+      {
+        type: "readingPositionChanged",
+        editorLine: 8,
+        editorColumn: 3,
+        editorProgress: 0.25,
+        previewHeadingId: "heading-1",
+        previewProgress: 0.5,
+      },
+      { type: "previewTapped" },
+    ]
+
+    messages.forEach((message) => {
+      expect(() => encodeWebMessage(message)).not.toThrow()
+    })
+  })
+
+  it("rejects invalid reading events from the renderer", () => {
+    expect(() =>
+      encodeWebMessage({
+        type: "searchResult",
+        current: 2,
+        total: 1,
+      }),
+    ).toThrow()
+    expect(() =>
+      encodeWebMessage({
+        type: "outlineChanged",
+        headings: [
+          { id: "same", title: "A", level: 1, sourceLine: 1 },
+          { id: "same", title: "B", level: 2, sourceLine: 2 },
+        ],
+      }),
+    ).toThrow()
   })
 
   it("prevents external navigation and emits a bridge event", () => {

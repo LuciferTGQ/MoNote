@@ -70,6 +70,52 @@ class DocumentScreenTest {
         assertEquals(listOf(EditorCommand.ITALIC), commands)
     }
 
+    @Test
+    fun searchBarAndEmptyOutlineHaveClearStates() {
+        show(
+            EditorUiState(
+                session = session(),
+                loading = false,
+                searchVisible = true,
+                outlineVisible = true,
+            ),
+            isLandscape = false,
+        )
+
+        composeRule.onNodeWithTag("document-search").assertIsDisplayed()
+        composeRule.onNodeWithTag("search-field").assertIsDisplayed()
+        composeRule.onNodeWithTag("outline-empty").assertIsDisplayed()
+    }
+
+    @Test
+    fun readingToolsMenuExposesSearchOutlineAndImmersiveReading() {
+        show(EditorUiState(session = session(), loading = false), isLandscape = false)
+
+        composeRule.onNodeWithTag("reading-tools-action").performClick()
+
+        composeRule.onNodeWithText("文内搜索").assertIsDisplayed()
+        composeRule.onNodeWithText("标题目录").assertIsDisplayed()
+        composeRule.onNodeWithText("沉浸阅读").assertIsDisplayed()
+    }
+
+    @Test
+    fun immersiveReadingUsesOnePreviewSurfaceAndOnlyReadingControls() {
+        show(
+            EditorUiState(
+                session = session(),
+                loading = false,
+                readingMode = true,
+                readingControlsVisible = true,
+            ),
+            isLandscape = true,
+        )
+
+        composeRule.onNodeWithTag("editor-mode-read").assertIsDisplayed()
+        composeRule.onNodeWithTag("reading-controls").assertIsDisplayed()
+        composeRule.onNodeWithTag("editor-toolbar").assertDoesNotExist()
+        composeRule.onNodeWithTag("split-divider").assertDoesNotExist()
+    }
+
     private fun show(
         state: EditorUiState,
         isLandscape: Boolean,

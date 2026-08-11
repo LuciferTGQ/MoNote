@@ -10,6 +10,7 @@ import app.monote.mobile.feature.editor.bridge.EditorCommand
 import app.monote.mobile.feature.editor.bridge.EditorMode
 import app.monote.mobile.feature.editor.bridge.EditorTheme
 import app.monote.mobile.feature.editor.bridge.NativeMessage
+import app.monote.mobile.feature.editor.bridge.SearchAction
 import app.monote.mobile.feature.editor.bridge.WebMessage
 import app.monote.mobile.feature.settings.AppSettingsStore
 import app.monote.mobile.feature.settings.EditorFontSize
@@ -33,6 +34,8 @@ class EditorViewModel(
     private val recoveryStore: RecoveryStore,
     private val orientationStore: OrientationPreferenceStore,
     private val appSettingsStore: AppSettingsStore,
+    private val readingStateRepository: ReadingStateRepository = ReadingStateRepository(paths),
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private val reducer = DocumentSessionReducer()
     private val mutableUiState = MutableStateFlow(EditorUiState())
@@ -44,6 +47,10 @@ class EditorViewModel(
     private var editorFontSize = EditorFontSize.Standard
     private var documentLoadStarted = false
     private var splitRatioSaveJob: Job? = null
+    private var readingStateSaveJob: Job? = null
+    private var readingControlsJob: Job? = null
+    private var readingDocumentState: ReadingDocumentState? = null
+    private var readingPositionRestored = false
     private val saveCoordinator = SaveCoordinator(
         scope = viewModelScope,
         recovery = recoveryStore,
@@ -137,11 +144,115 @@ class EditorViewModel(
         surfaceController.send(NativeMessage.Command(command))
     }
 
+    fun showSearch() {
+        readingControlsJob?.cancel()
+        mutableUiState.update { it.copy(searchVisible = true, readingControlsVisible = true) }
+    }
+
+    fun hideSearch() {
+        mutableUiState.update {
+            it.copy(searchVisible = false, searchQuery = "", searchCurrent = 0, searchTotal = 0)
+        }
+        if (surfaceReady) surfaceController.send(NativeMessage.SearchDocument("", SearchAction.RESET))
+        scheduleReadingControlsHide()
+    }
+
+    fun updateSearchQuery(query: String) {
+        val bounded = query.take(MAX_SEARCH_QUERY_LENGTH)
+        mutableUiState.update { it.copy(searchQuery = bounded) }
+        if (surfaceReady) surfaceController.send(NativeMessage.SearchDocument(bounded, SearchAction.RESET))
+    }
+
+    fun findNext() = search(SearchAction.NEXT)
+
+    fun findPrevious() = search(SearchAction.PREVIOUS)
+
+    fun showOutline(tab: OutlineTab = OutlineTab.Outline) {
+        readingControlsJob?.cancel()
+        mutableUiState.update {
+            it.copy(outlineVisible = true, outlineTab = tab, readingControlsVisible = true)
+        }
+    }
+
+    fun dismissOutline() {
+        mutableUiState.update { it.copy(outlineVisible = false) }
+        scheduleReadingControlsHide()
+    }
+
+    fun selectOutlineTab(tab: OutlineTab) {
+        mutableUiState.update { it.copy(outlineTab = tab) }
+    }
+
+    fun navigateToHeading(headingId: String) {
+        if (mutableUiState.value.outline.none { it.id == headingId }) return
+        surfaceController.send(NativeMessage.NavigateToHeading(headingId))
+        dismissOutline()
+    }
+
+    fun toggleHeadingBookmark(headingId: String) {
+        val current = readingDocumentState ?: return
+        val existing = current.bookmarks.firstOrNull { it.id == headingId }
+        val bookmarks = if (existing != null) {
+            current.bookmarks - existing
+        } else {
+            val heading = mutableUiState.value.outline.firstOrNull { it.id == headingId } ?: return
+            if (current.bookmarks.size >= MAX_HEADING_BOOKMARKS) {
+                mutableUiState.update { it.copy(error = "每份文档最多保存 200 个标题书签") }
+                return
+            }
+            current.bookmarks + HeadingBookmark(heading.id, heading.title, heading.level, heading.sourceLine)
+        }
+        readingDocumentState = current.copy(bookmarks = bookmarks, updatedAt = clock())
+        updateResolvedBookmarks()
+        scheduleReadingStateSave(immediate = true)
+        showReadingControls()
+    }
+
+    fun enterReadingMode() {
+        mutableUiState.update {
+            it.copy(
+                readingMode = true,
+                readingControlsVisible = true,
+                searchVisible = false,
+                outlineVisible = false,
+            )
+        }
+        sendMode()
+        scheduleReadingControlsHide()
+    }
+
+    fun exitReadingMode() {
+        readingControlsJob?.cancel()
+        val clearSearch = mutableUiState.value.searchVisible || mutableUiState.value.searchQuery.isNotEmpty()
+        mutableUiState.update {
+            it.copy(
+                readingMode = false,
+                readingControlsVisible = true,
+                searchVisible = false,
+                searchQuery = "",
+                searchCurrent = 0,
+                searchTotal = 0,
+                outlineVisible = false,
+            )
+        }
+        if (clearSearch && surfaceReady) {
+            surfaceController.send(NativeMessage.SearchDocument("", SearchAction.RESET))
+        }
+        sendMode()
+    }
+
+    fun showReadingControls() {
+        if (!mutableUiState.value.readingMode) return
+        mutableUiState.update { it.copy(readingControlsVisible = true) }
+        scheduleReadingControlsHide()
+    }
+
     fun requestExit(onExit: () -> Unit) {
         val requested = mutableUiState.value.requestExit()
         mutableUiState.value = requested
         if (requested.canExitImmediately) {
             viewModelScope.launch {
+                flushReadingState()
                 requested.session?.let { saveCoordinator.onCleanClose(it) }
                 onExit()
             }
@@ -156,6 +267,7 @@ class EditorViewModel(
         val session = mutableUiState.value.session ?: return onExit()
         viewModelScope.launch {
             saveCoordinator.flushForBackground(session.copy(autoSaveEnabled = true))
+            flushReadingState()
             val latest = mutableUiState.value.session
             if (latest != null && !latest.isDirty && latest.externalConflict == null) {
                 saveCoordinator.onCleanClose(latest)
@@ -173,15 +285,18 @@ class EditorViewModel(
         saveCoordinator.cancel()
         splitRatioSaveJob?.cancel()
         viewModelScope.launch {
+            flushReadingState()
             if (id != null) runCatching { recoveryStore.delete(id) }
             onExit()
         }
     }
 
     fun flushForBackground() {
-        val session = mutableUiState.value.session ?: return
-        if (!session.isDirty) return
-        viewModelScope.launch { saveCoordinator.flushForBackground(session) }
+        val session = mutableUiState.value.session
+        viewModelScope.launch {
+            if (session?.isDirty == true) saveCoordinator.flushForBackground(session)
+            flushReadingState()
+        }
     }
 
     fun saveNow() {
@@ -282,10 +397,23 @@ class EditorViewModel(
                     canRedo = false,
                     autoSaveEnabled = autoSaveEnabled,
                 )
-                session to recoveryStore.candidate(session.id, file)
+                val legacyId = editorDocumentFor(file, paths.root).id
+                val reading = if (legacyId == session.id) {
+                    readingStateRepository.get(session.id)
+                } else {
+                    readingStateRepository.migrate(legacyId, session.id)
+                        ?: readingStateRepository.get(session.id)
+                } ?: ReadingDocumentState(documentId = session.id)
+                Triple(session, recoveryStore.candidate(session.id, file), reading)
             }
+            readingDocumentState = result.third
             mutableUiState.update {
-                it.copy(session = result.first, recoveryCandidate = result.second, loading = false)
+                it.copy(
+                    session = result.first,
+                    recoveryCandidate = result.second,
+                    bookmarks = reconcileHeadingBookmarks(result.third.bookmarks, it.outline),
+                    loading = false,
+                )
             }
             if (surfaceReady) sendLoad()
         } catch (cancelled: CancellationException) {
@@ -337,6 +465,27 @@ class EditorViewModel(
                 saveCoordinator.onChanged(changed)
             }
             is WebMessage.ExternalLink -> mutableUiState.update { it.copy(externalLink = message.href) }
+            is WebMessage.OutlineChanged -> {
+                mutableUiState.update { it.copy(outline = message.headings) }
+                val current = readingDocumentState
+                if (current != null) {
+                    val resolved = reconcileHeadingBookmarks(current.bookmarks, message.headings)
+                    val reconciled = resolved.map(ResolvedHeadingBookmark::bookmark)
+                    if (reconciled != current.bookmarks) {
+                        readingDocumentState = current.copy(bookmarks = reconciled, updatedAt = clock())
+                        scheduleReadingStateSave(immediate = true)
+                    }
+                    mutableUiState.update { it.copy(bookmarks = resolved) }
+                }
+            }
+            is WebMessage.SearchResult -> mutableUiState.update {
+                it.copy(searchCurrent = message.current, searchTotal = message.total)
+            }
+            is WebMessage.ActiveHeadingChanged -> mutableUiState.update {
+                it.copy(activeHeadingId = message.headingId)
+            }
+            is WebMessage.ReadingPositionChanged -> updateReadingPosition(message)
+            WebMessage.PreviewTapped -> showReadingControls()
             is WebMessage.RenderError -> mutableUiState.update {
                 it.copy(renderWarning = "${message.block}：${message.message}")
             }
@@ -361,10 +510,93 @@ class EditorViewModel(
         surfaceController.send(
             NativeMessage.Load(session.revision, session.text, state.editorMode(isLandscape), theme),
         )
+        if (!readingPositionRestored) {
+            readingDocumentState?.position?.let { position ->
+                surfaceController.send(
+                    NativeMessage.RestoreReadingPosition(
+                        position.editorLine,
+                        position.editorColumn,
+                        position.editorProgress,
+                        position.previewHeadingId,
+                        position.previewProgress,
+                    ),
+                )
+                readingPositionRestored = true
+            }
+        }
+    }
+
+    private fun search(action: SearchAction) {
+        if (surfaceReady) {
+            surfaceController.send(NativeMessage.SearchDocument(mutableUiState.value.searchQuery, action))
+        }
+    }
+
+    private fun updateReadingPosition(message: WebMessage.ReadingPositionChanged) {
+        val current = readingDocumentState ?: return
+        readingDocumentState = current.copy(
+            position = ReadingPosition(
+                message.editorLine,
+                message.editorColumn,
+                message.editorProgress,
+                message.previewHeadingId,
+                message.previewProgress,
+            ),
+            updatedAt = clock(),
+        )
+        scheduleReadingStateSave(immediate = false)
+    }
+
+    private fun updateResolvedBookmarks() {
+        val current = readingDocumentState ?: return
+        mutableUiState.update {
+            it.copy(bookmarks = reconcileHeadingBookmarks(current.bookmarks, it.outline))
+        }
+    }
+
+    private fun scheduleReadingStateSave(immediate: Boolean) {
+        readingStateSaveJob?.cancel()
+        readingStateSaveJob = viewModelScope.launch {
+            if (!immediate) delay(READING_STATE_SAVE_DELAY_MILLIS)
+            persistReadingState()
+        }
+    }
+
+    private suspend fun flushReadingState() {
+        readingStateSaveJob?.cancel()
+        readingStateSaveJob = null
+        persistReadingState()
+    }
+
+    private suspend fun persistReadingState() {
+        val state = readingDocumentState ?: return
+        try {
+            readingStateRepository.replace(state)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            mutableUiState.update { it.copy(error = error.message ?: "阅读位置保存失败") }
+        }
+    }
+
+    private fun scheduleReadingControlsHide() {
+        readingControlsJob?.cancel()
+        val state = mutableUiState.value
+        if (!state.readingMode || state.searchVisible || state.outlineVisible) return
+        readingControlsJob = viewModelScope.launch {
+            delay(READING_CONTROLS_HIDE_DELAY_MILLIS)
+            mutableUiState.update { current ->
+                if (current.readingMode && !current.searchVisible && !current.outlineVisible) {
+                    current.copy(readingControlsVisible = false)
+                } else current
+            }
+        }
     }
 
     override fun onCleared() {
         saveCoordinator.cancel()
+        readingStateSaveJob?.cancel()
+        readingControlsJob?.cancel()
         surfaceController.close()
         super.onCleared()
     }
@@ -372,6 +604,10 @@ class EditorViewModel(
     private companion object {
         const val MAX_DOCUMENT_BYTES = 64L * 1024 * 1024
         const val SPLIT_RATIO_SAVE_DELAY_MILLIS = 250L
+        const val READING_STATE_SAVE_DELAY_MILLIS = 750L
+        const val READING_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
+        const val MAX_SEARCH_QUERY_LENGTH = 256
+        const val MAX_HEADING_BOOKMARKS = 200
     }
 }
 

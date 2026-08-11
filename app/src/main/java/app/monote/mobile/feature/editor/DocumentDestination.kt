@@ -22,6 +22,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import app.monote.mobile.LibraryServices
 import app.monote.mobile.feature.settings.AppSettingsStore
 
@@ -44,6 +47,7 @@ fun DocumentDestination(
                 recoveryStore = services.recoveryStore,
                 orientationStore = OrientationPreferenceStore(settings),
                 appSettingsStore = AppSettingsStore(settings),
+                readingStateRepository = services.readingStateRepository,
             )
         },
     )
@@ -55,6 +59,19 @@ fun DocumentDestination(
     LaunchedEffect(darkTheme) { model.setTheme(darkTheme) }
     LaunchedEffect(activity, state.orientationPreference) {
         activity?.let { applyOrientationPreference(it, state.orientationPreference) }
+    }
+    LaunchedEffect(activity, state.readingMode) {
+        val window = activity?.window ?: return@LaunchedEffect
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        if (state.readingMode) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            WindowCompat.setDecorFitsSystemWindows(window, true)
+        }
     }
     LaunchedEffect(state.externalLink) {
         val link = state.externalLink ?: return@LaunchedEffect
@@ -70,11 +87,18 @@ fun DocumentDestination(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            activity?.window?.let { window ->
+                WindowCompat.getInsetsController(window, window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+            }
             activity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
-    BackHandler { model.requestExit(onExit) }
+    BackHandler {
+        if (state.readingMode) model.exitReadingMode() else model.requestExit(onExit)
+    }
     DocumentScreen(
         state = state,
         isLandscape = isLandscape,
@@ -92,6 +116,18 @@ fun DocumentDestination(
         onKeepMine = model::keepMine,
         onLoadExternal = model::loadExternal,
         onSaveCopy = model::saveCopy,
+        onShowSearch = model::showSearch,
+        onHideSearch = model::hideSearch,
+        onSearchQuery = model::updateSearchQuery,
+        onFindPrevious = model::findPrevious,
+        onFindNext = model::findNext,
+        onShowOutline = model::showOutline,
+        onDismissOutline = model::dismissOutline,
+        onSelectOutlineTab = model::selectOutlineTab,
+        onNavigateToHeading = model::navigateToHeading,
+        onToggleBookmark = model::toggleHeadingBookmark,
+        onEnterReading = model::enterReadingMode,
+        onExitReading = model::exitReadingMode,
         surface = { modifier ->
             DocumentSurface(
                 controller = model.surfaceController,

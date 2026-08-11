@@ -3,7 +3,7 @@ import {
   normalizeExternalHttpUrl,
 } from "./urlPolicy"
 
-export type EditorMode = "edit" | "preview" | "split"
+export type EditorMode = "edit" | "preview" | "split" | "read"
 export type EditorTheme = "light" | "dark"
 export type EditorCommand =
   | "undo"
@@ -39,6 +39,27 @@ export type NativeMessage =
       type: "setPreviewPolicy"
       largeDocument: "manual" | "live"
     }
+  | {
+      type: "searchDocument"
+      query: string
+      action: "reset" | "next" | "previous"
+    }
+  | { type: "navigateToHeading"; headingId: string }
+  | {
+      type: "restoreReadingPosition"
+      editorLine: number
+      editorColumn: number
+      editorProgress: number
+      previewHeadingId: string | null
+      previewProgress: number
+    }
+
+export interface DocumentHeading {
+  id: string
+  title: string
+  level: number
+  sourceLine: number
+}
 
 export type WebMessage =
   | { type: "ready" }
@@ -51,8 +72,20 @@ export type WebMessage =
     }
   | { type: "externalLink"; href: string }
   | { type: "renderError"; block: string; message: string }
+  | { type: "outlineChanged"; headings: DocumentHeading[] }
+  | { type: "searchResult"; current: number; total: number }
+  | { type: "activeHeadingChanged"; headingId: string | null }
+  | {
+      type: "readingPositionChanged"
+      editorLine: number
+      editorColumn: number
+      editorProgress: number
+      previewHeadingId: string | null
+      previewProgress: number
+    }
+  | { type: "previewTapped" }
 
-const modes = new Set<EditorMode>(["edit", "preview", "split"])
+const modes = new Set<EditorMode>(["edit", "preview", "split", "read"])
 const themes = new Set<EditorTheme>(["light", "dark"])
 const commands = new Set<EditorCommand>([
   "undo",
@@ -92,6 +125,38 @@ function hasExactKeys(
 
 function isRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
+}
+
+function isProgress(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+function isHeadingId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+function isHeading(value: unknown): value is DocumentHeading {
+  return isRecord(value) &&
+    hasExactKeys(value, ["id", "title", "level", "sourceLine"]) &&
+    isHeadingId(value.id) &&
+    typeof value.title === "string" &&
+    value.title.trim().length > 0 &&
+    value.title.length <= 512 &&
+    !/[\u0000-\u001f\u007f]/.test(value.title) &&
+    isBoundedInteger(value.level, 1, 6) &&
+    isBoundedInteger(value.sourceLine, 1, 10_000_000)
+}
+
+function isReadingPosition(value: Record<string, unknown>): boolean {
+  return isBoundedInteger(value.editorLine, 1, 10_000_000) &&
+    isBoundedInteger(value.editorColumn, 0, 10_000_000) &&
+    isProgress(value.editorProgress) &&
+    (value.previewHeadingId === null || isHeadingId(value.previewHeadingId)) &&
+    isProgress(value.previewProgress)
 }
 
 function decodeJson(raw: string): unknown {
@@ -155,6 +220,29 @@ export function parseNativeMessage(raw: string): NativeMessage | null {
         (value.largeDocument === "manual" || value.largeDocument === "live")
         ? (value as NativeMessage)
         : null
+    case "searchDocument":
+      return hasExactKeys(value, ["type", "query", "action"]) &&
+        typeof value.query === "string" &&
+        value.query.length <= 256 &&
+        ["reset", "next", "previous"].includes(value.action as string)
+        ? (value as NativeMessage)
+        : null
+    case "navigateToHeading":
+      return hasExactKeys(value, ["type", "headingId"]) &&
+        isHeadingId(value.headingId)
+        ? (value as NativeMessage)
+        : null
+    case "restoreReadingPosition":
+      return hasExactKeys(value, [
+        "type",
+        "editorLine",
+        "editorColumn",
+        "editorProgress",
+        "previewHeadingId",
+        "previewProgress",
+      ]) && isReadingPosition(value)
+        ? (value as NativeMessage)
+        : null
     default:
       return null
   }
@@ -191,6 +279,31 @@ export function isWebMessage(value: unknown): value is WebMessage {
         typeof value.block === "string" &&
         typeof value.message === "string"
       )
+    case "outlineChanged": {
+      if (!hasExactKeys(value, ["type", "headings"]) || !Array.isArray(value.headings) || value.headings.length > 1000) return false
+      if (!value.headings.every(isHeading)) return false
+      const ids = new Set(value.headings.map((heading) => heading.id))
+      return ids.size === value.headings.length
+    }
+    case "searchResult":
+      return hasExactKeys(value, ["type", "current", "total"]) &&
+        isBoundedInteger(value.total, 0, 1000) &&
+        ((value.total === 0 && value.current === 0) ||
+          ((value.total as number) > 0 && isBoundedInteger(value.current, 1, value.total as number)))
+    case "activeHeadingChanged":
+      return hasExactKeys(value, ["type", "headingId"]) &&
+        (value.headingId === null || isHeadingId(value.headingId))
+    case "readingPositionChanged":
+      return hasExactKeys(value, [
+        "type",
+        "editorLine",
+        "editorColumn",
+        "editorProgress",
+        "previewHeadingId",
+        "previewProgress",
+      ]) && isReadingPosition(value)
+    case "previewTapped":
+      return hasExactKeys(value, ["type"])
     default:
       return false
   }

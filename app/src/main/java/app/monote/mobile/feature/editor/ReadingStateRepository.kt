@@ -63,19 +63,24 @@ class ReadingStateRepository(
         prettyPrint = true
     }
     private val mutex = Mutex()
-    private var states = read().documents.associateBy(ReadingDocumentState::documentId)
+    private var states = emptyMap<String, ReadingDocumentState>()
+    private var loaded = false
 
     init {
         require(maxDocuments > 0) { "Reading state capacity must be positive" }
     }
 
     suspend fun get(documentId: String): ReadingDocumentState? = mutex.withLock {
-        requireDocumentId(documentId)
-        states[documentId]
+        withContext(Dispatchers.IO) {
+            requireDocumentId(documentId)
+            ensureLoaded()
+            states[documentId]
+        }
     }
 
     suspend fun replace(state: ReadingDocumentState) = mutex.withLock {
         withContext(Dispatchers.IO) {
+            ensureLoaded()
             validate(state)
             val next = states.toMutableMap().apply { put(state.documentId, state) }
             persist(prune(next))
@@ -84,6 +89,7 @@ class ReadingStateRepository(
 
     suspend fun migrate(legacyId: String, stableId: String): ReadingDocumentState? = mutex.withLock {
         withContext(Dispatchers.IO) {
+            ensureLoaded()
             requireDocumentId(legacyId)
             requireDocumentId(stableId)
             if (legacyId == stableId) return@withContext states[stableId]
@@ -105,6 +111,7 @@ class ReadingStateRepository(
 
     suspend fun remove(documentIds: Set<String>) = mutex.withLock {
         withContext(Dispatchers.IO) {
+            ensureLoaded()
             documentIds.forEach(::requireDocumentId)
             val next = states - documentIds
             if (next != states) persist(next)
@@ -120,6 +127,12 @@ class ReadingStateRepository(
                 .thenBy { it.documentId },
         ).take(removeCount).mapTo(hashSetOf(), ReadingDocumentState::documentId)
         return next.filterKeys { it !in evicted }
+    }
+
+    private fun ensureLoaded() {
+        if (loaded) return
+        states = read().documents.associateBy(ReadingDocumentState::documentId)
+        loaded = true
     }
 
     private fun persist(next: Map<String, ReadingDocumentState>) {
@@ -205,17 +218,20 @@ fun reconcileHeadingBookmarks(
     bookmarks: List<HeadingBookmark>,
     headings: List<DocumentHeading>,
 ): List<ResolvedHeadingBookmark> {
-    val availableById = headings.associateBy(DocumentHeading::id)
     val unused = headings.toMutableList()
     return bookmarks.map { bookmark ->
-        val exact = availableById[bookmark.id]
-        val candidate = exact ?: unused
+        val candidates = unused
             .asSequence()
             .filter {
                 it.level == bookmark.level &&
                     normalizedHeadingTitle(it.title) == normalizedHeadingTitle(bookmark.title)
             }
-            .minByOrNull { abs(it.sourceLine - bookmark.sourceLine) }
+            .toList()
+        val candidate = candidates.minWithOrNull(
+            compareBy<DocumentHeading> { abs(it.sourceLine - bookmark.sourceLine) }
+                .thenByDescending { it.id == bookmark.id }
+                .thenBy { it.sourceLine },
+        )
         if (candidate == null) {
             ResolvedHeadingBookmark(bookmark, available = false)
         } else {

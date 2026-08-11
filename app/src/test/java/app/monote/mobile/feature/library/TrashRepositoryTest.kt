@@ -104,6 +104,38 @@ class TrashRepositoryTest {
     }
 
     @Test
+    fun permanentDeletionReportsEveryContainedDocumentIdForReadingStateCleanup() = runBlocking {
+        val environment = environment()
+        val source = environment.paths.root.resolve("course").apply { mkdirs() }
+        val first = source.resolve("one.md").apply { writeText("one") }
+        val second = source.resolve("two.md").apply { writeText("two") }
+        environment.catalog.upsert(
+            DocumentEntity("doc-one", "course/one.md", "one", first.lastModified(), first.length(), "one"),
+            first.readText(),
+            emptySet(),
+        )
+        environment.catalog.upsert(
+            DocumentEntity("doc-two", "course/two.md", "two", second.lastModified(), second.length(), "two"),
+            second.readText(),
+            emptySet(),
+        )
+        var removed = emptySet<String>()
+        val repository = TrashRepository(
+            environment.paths,
+            environment.catalog,
+            PendingRestoreTrustStore(environment.trustDirectory),
+            directoryMetadataRepository = environment.directoryMetadata,
+            onDocumentsPermanentlyDeleted = { removed = it },
+        )
+
+        val entry = repository.moveToTrash(source)
+        val result = repository.deletePermanently(entry.stableId, confirmed = true)
+
+        assertTrue(result is TrashDeleteResult.Success)
+        assertEquals(setOf("doc-one", "doc-two"), removed)
+    }
+
+    @Test
     fun purgeDeletesOnlyEntriesStrictlyOlderThanThirtyDaysAfterConfirmation() = runBlocking {
         val environment = environment()
         val now = Instant.parse("2026-07-31T00:00:00Z")

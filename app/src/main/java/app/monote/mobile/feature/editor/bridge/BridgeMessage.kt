@@ -1,5 +1,6 @@
 package app.monote.mobile.feature.editor.bridge
 
+import app.monote.mobile.feature.editor.DocumentHeading
 import java.net.URI
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -33,6 +34,35 @@ sealed interface WebMessage {
         val block: String,
         val message: String,
     ) : WebMessage
+
+    @Serializable
+    @SerialName("outlineChanged")
+    data class OutlineChanged(val headings: List<DocumentHeading>) : WebMessage
+
+    @Serializable
+    @SerialName("searchResult")
+    data class SearchResult(
+        val current: Int,
+        val total: Int,
+    ) : WebMessage
+
+    @Serializable
+    @SerialName("activeHeadingChanged")
+    data class ActiveHeadingChanged(val headingId: String?) : WebMessage
+
+    @Serializable
+    @SerialName("readingPositionChanged")
+    data class ReadingPositionChanged(
+        val editorLine: Int,
+        val editorColumn: Int,
+        val editorProgress: Float,
+        val previewHeadingId: String?,
+        val previewProgress: Float,
+    ) : WebMessage
+
+    @Serializable
+    @SerialName("previewTapped")
+    data object PreviewTapped : WebMessage
 }
 
 @Serializable
@@ -71,6 +101,27 @@ sealed interface NativeMessage {
     data class SetPreviewPolicy(
         val largeDocument: LargeDocumentPolicy,
     ) : NativeMessage
+
+    @Serializable
+    @SerialName("searchDocument")
+    data class SearchDocument(
+        val query: String,
+        val action: SearchAction,
+    ) : NativeMessage
+
+    @Serializable
+    @SerialName("navigateToHeading")
+    data class NavigateToHeading(val headingId: String) : NativeMessage
+
+    @Serializable
+    @SerialName("restoreReadingPosition")
+    data class RestoreReadingPosition(
+        val editorLine: Int,
+        val editorColumn: Int,
+        val editorProgress: Float,
+        val previewHeadingId: String?,
+        val previewProgress: Float,
+    ) : NativeMessage
 }
 
 @Serializable
@@ -83,6 +134,21 @@ enum class EditorMode {
 
     @SerialName("split")
     SPLIT,
+
+    @SerialName("read")
+    READ,
+}
+
+@Serializable
+enum class SearchAction {
+    @SerialName("reset")
+    RESET,
+
+    @SerialName("next")
+    NEXT,
+
+    @SerialName("previous")
+    PREVIOUS,
 }
 
 @Serializable
@@ -180,6 +246,17 @@ class BridgeMessageCodec(
             is WebMessage.Changed -> validateRevision(message.revision)
             is WebMessage.ExternalLink -> validateExternalLink(message.href)
             is WebMessage.RenderError -> Unit
+            is WebMessage.OutlineChanged -> validateOutline(message.headings)
+            is WebMessage.SearchResult -> validateSearchResult(message.current, message.total)
+            is WebMessage.ActiveHeadingChanged -> message.headingId?.let(::validateHeadingId)
+            is WebMessage.ReadingPositionChanged -> validateReadingPosition(
+                message.editorLine,
+                message.editorColumn,
+                message.editorProgress,
+                message.previewHeadingId,
+                message.previewProgress,
+            )
+            WebMessage.PreviewTapped -> Unit
         }
     }
 
@@ -191,6 +268,17 @@ class BridgeMessageCodec(
             is NativeMessage.SetMode,
             is NativeMessage.SetPreviewPolicy,
             -> Unit
+            is NativeMessage.SearchDocument -> if (message.query.length > MAX_SEARCH_QUERY) {
+                throw SerializationException("Search query is too long")
+            }
+            is NativeMessage.NavigateToHeading -> validateHeadingId(message.headingId)
+            is NativeMessage.RestoreReadingPosition -> validateReadingPosition(
+                message.editorLine,
+                message.editorColumn,
+                message.editorProgress,
+                message.previewHeadingId,
+                message.previewProgress,
+            )
             is NativeMessage.SetSplitRatio -> if (message.ratio !in 0.25f..0.75f) {
                 throw SerializationException("Split ratio is outside the supported range")
             }
@@ -220,7 +308,71 @@ class BridgeMessageCodec(
         }
     }
 
+    private fun validateOutline(headings: List<DocumentHeading>) {
+        if (headings.size > MAX_REPORTED_ITEMS) {
+            throw SerializationException("Outline contains too many headings")
+        }
+        if (headings.map(DocumentHeading::id).toSet().size != headings.size) {
+            throw SerializationException("Outline heading IDs must be unique")
+        }
+        headings.forEach { heading ->
+            validateHeadingId(heading.id)
+            if (
+                heading.title.isBlank() ||
+                heading.title.length > MAX_HEADING_TITLE ||
+                heading.title.any(Char::isISOControl) ||
+                heading.level !in 1..6 ||
+                heading.sourceLine !in 1..MAX_SOURCE_POSITION
+            ) {
+                throw SerializationException("Outline heading is invalid")
+            }
+        }
+    }
+
+    private fun validateSearchResult(current: Int, total: Int) {
+        if (
+            total !in 0..MAX_REPORTED_ITEMS ||
+            (total == 0 && current != 0) ||
+            (total > 0 && current !in 1..total)
+        ) {
+            throw SerializationException("Search result is invalid")
+        }
+    }
+
+    private fun validateReadingPosition(
+        editorLine: Int,
+        editorColumn: Int,
+        editorProgress: Float,
+        previewHeadingId: String?,
+        previewProgress: Float,
+    ) {
+        if (
+            editorLine !in 1..MAX_SOURCE_POSITION ||
+            editorColumn !in 0..MAX_SOURCE_POSITION ||
+            !editorProgress.isFinite() || editorProgress !in 0f..1f ||
+            !previewProgress.isFinite() || previewProgress !in 0f..1f
+        ) {
+            throw SerializationException("Reading position is invalid")
+        }
+        previewHeadingId?.let(::validateHeadingId)
+    }
+
+    private fun validateHeadingId(headingId: String) {
+        if (
+            headingId.isBlank() ||
+            headingId.length > MAX_HEADING_ID ||
+            headingId.any(Char::isISOControl)
+        ) {
+            throw SerializationException("Heading ID is invalid")
+        }
+    }
+
     private companion object {
         val SUPPORTED_FONT_SIZES = setOf(14, 16, 20)
+        const val MAX_SEARCH_QUERY = 256
+        const val MAX_REPORTED_ITEMS = 1_000
+        const val MAX_HEADING_ID = 256
+        const val MAX_HEADING_TITLE = 512
+        const val MAX_SOURCE_POSITION = 10_000_000
     }
 }

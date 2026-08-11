@@ -375,7 +375,7 @@ private fun LibraryDestination(
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val model: LibraryViewModel = viewModel(factory = LibraryViewModelFactory {
-        LibraryViewModel(services.paths, services.catalogRepository, services.libraryIndexer, services.libraryService, services.importCoordinator, services.trashRepository, services.folderImportCoordinator, services.directoryMetadataRepository, services.moveRecoveryRepository)
+        LibraryViewModel(services.paths, services.catalogRepository, services.libraryIndexer, services.libraryService, services.importCoordinator, services.trashRepository, services.folderImportCoordinator, services.directoryMetadataRepository, services.moveRecoveryRepository, services.readingStateRepository)
     })
     val state by model.uiState.collectAsStateWithLifecycle()
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -473,10 +473,10 @@ private fun LibraryDestination(
             onDismiss = { if (!incomingImporting) onIncomingConsumed(request.id) },
             onConfirm = {
                 incomingImporting = true
-                model.importIncomingDocuments(request.documents) { imported ->
+                model.importIncomingDocuments(request.documents) { stableId, imported ->
                     incomingImporting = false
                     onIncomingConsumed(request.id)
-                    onOpenEditor(null, imported)
+                    onOpenEditor(stableId, imported)
                 }
             },
         )
@@ -491,7 +491,7 @@ private fun LibraryDestination(
             }
             selectedUris = emptyList()
             selectedUriMetadata = emptyList()
-            model.importDocuments(sources) { imported -> onOpenEditor(null, imported) }
+            model.importDocuments(sources) { stableId, imported -> onOpenEditor(stableId, imported) }
         }
     }
     selectedTree?.let { tree -> selectedTreeMetadata?.let { treeMetadata ->
@@ -508,10 +508,10 @@ private fun LibraryDestination(
             onDismiss = { if (!folderImporting) selectedTree = null },
             onConfirm = {
                 folderImporting = true
-                model.importFolder(ContentResolverTreeDocumentSource(context, tree, treeMetadata.displayName)) { imported ->
+                model.importFolder(ContentResolverTreeDocumentSource(context, tree, treeMetadata.displayName)) { stableId, imported ->
                     folderImporting = false
                     selectedTree = null
-                    onOpenEditor(null, imported)
+                    onOpenEditor(stableId, imported)
                 }
             },
         )

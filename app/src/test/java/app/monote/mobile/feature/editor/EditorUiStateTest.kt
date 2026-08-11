@@ -1,6 +1,7 @@
 package app.monote.mobile.feature.editor
 
 import app.monote.mobile.core.storage.DocumentFingerprint
+import app.monote.mobile.feature.editor.bridge.EditorMode
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,6 +28,14 @@ class EditorUiStateTest {
         assertFalse(requested.pendingExit)
         assertTrue(requested.canExitImmediately)
         assertEquals(EditorTab.Edit, requested.selectedTab)
+    }
+
+    @Test
+    fun immersiveReadingAlwaysUsesPreviewOnlyEvenInLandscape() {
+        val state = EditorUiState(readingMode = true, selectedTab = EditorTab.Edit)
+
+        assertEquals(EditorMode.READ, state.editorMode(isLandscape = false))
+        assertEquals(EditorMode.READ, state.editorMode(isLandscape = true))
     }
 
     private fun session(text: String, baselineText: String = "original") = DocumentSession(

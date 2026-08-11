@@ -12,8 +12,13 @@ import {
   sanitizeMarkdownHtml,
   sanitizeUserProvidedHtml,
 } from "./security"
+import type { DocumentHeading } from "./bridge"
 
 export type RendererPlugin = (engine: MarkdownIt) => void
+export interface RenderedMarkdownDocument {
+  html: string
+  headings: DocumentHeading[]
+}
 export const DEFERRED_CODE_BYTES = 16 * 1024
 export const DEFERRED_CODE_LINES = 200
 
@@ -38,6 +43,20 @@ function shouldDeferCode(source: string): boolean {
   )
 }
 
+function normalizeHeadingTitle(value: string): string {
+  return value.trim().replace(/\s+/g, " ")
+}
+
+function stableHeadingSlug(value: string): string {
+  const normalized = normalizeHeadingTitle(value).toLocaleLowerCase()
+  let hash = 0x811c9dc5
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `monote-heading-${(hash >>> 0).toString(16)}`
+}
+
 export function createRenderer(
   plugins: readonly RendererPlugin[] = [],
 ): MarkdownIt {
@@ -48,7 +67,7 @@ export function createRenderer(
   })
     .use(footnote)
     .use(taskLists, { enabled: false })
-    .use(anchor)
+    .use(anchor, { slugify: stableHeadingSlug })
     .use(toc)
     .use(katex, {
       trust: false,
@@ -105,7 +124,48 @@ export function createRenderer(
 }
 
 export function renderMarkdown(source: string): string {
-  return sanitizeMarkdownHtml(createRenderer().render(source))
+  return renderMarkdownDocument(source).html
+}
+
+export function renderMarkdownDocument(source: string): RenderedMarkdownDocument {
+  const engine = createRenderer()
+  const environment = {}
+  const tokens = engine.parse(source, environment)
+  const headings: DocumentHeading[] = []
+
+  for (let index = 0; index < tokens.length && headings.length < 1_000; index += 1) {
+    const opening = tokens[index]
+    const inline = tokens[index + 1]
+    if (opening?.type !== "heading_open" || inline?.type !== "inline") continue
+    const level = Number.parseInt(opening.tag.slice(1), 10)
+    const sourceLine = (opening.map?.[0] ?? -1) + 1
+    const title = normalizeHeadingTitle(
+      (inline.children ?? [])
+        .filter((token) => !["html_inline", "image"].includes(token.type))
+        .map((token) => token.content)
+        .join(""),
+    )
+    const id = opening.attrGet("id") ?? ""
+    if (
+      title.length === 0 ||
+      title.length > 512 ||
+      id.length === 0 ||
+      id.length > 256 ||
+      level < 1 ||
+      level > 6 ||
+      sourceLine < 1
+    ) {
+      continue
+    }
+    headings.push({ id, title, level, sourceLine })
+  }
+
+  return {
+    html: sanitizeMarkdownHtml(
+      engine.renderer.render(tokens, engine.options, environment),
+    ),
+    headings,
+  }
 }
 
 export function hydrateDeferredCodeBlock(block: HTMLElement): boolean {

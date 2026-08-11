@@ -12,6 +12,8 @@ import app.monote.mobile.feature.importing.DocumentSource
 import app.monote.mobile.feature.importing.FolderImportCoordinator
 import app.monote.mobile.feature.importing.ImportCoordinator
 import app.monote.mobile.feature.importing.TreeDocumentSource
+import app.monote.mobile.feature.editor.ReadingStateRepository
+import app.monote.mobile.feature.editor.editorDocumentFor
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +39,7 @@ class LibraryViewModel(
     private val folderImportCoordinator: FolderImportCoordinator,
     private val directoryMetadataRepository: DirectoryMetadataRepository,
     private val moveRecoveryRepository: MoveRecoveryRepository,
+    private val readingStateRepository: ReadingStateRepository = ReadingStateRepository(paths),
 ) : ViewModel() {
     private val browser = LibraryBrowser(paths)
     private val root = browser.root
@@ -122,11 +125,13 @@ class LibraryViewModel(
     fun createFolder(name: String) = launchAction { libraryService.createFolder(browser.folder(currentFolder.value), name).throwIfFailure(); indexer.scan(root) }
     fun renameSelected(name: String) = launchAction {
         val item = selectedItems().singleOrNull() ?: error("重命名仅支持单个条目")
+        migrateLegacyReadingStates(listOf(item))
         libraryService.rename(item.file, name).throwIfFailure(); indexer.scan(root)
     }
     fun moveSelected(destinationRelativePath: String) = launchAction {
         val destination = browser.moveDestination(destinationRelativePath)
         val items = selectedItems().also { require(it.isNotEmpty()) { "没有可移动的已选条目" } }
+        migrateLegacyReadingStates(items)
         when (val result = libraryService.moveBatch(items.map { it.file }, destination)) {
             is BatchMoveResult.Success -> {
                 if (!result.catalogSynchronized) error.value = "移动已完成，但资料库索引同步失败，请重新扫描。"
@@ -164,15 +169,19 @@ class LibraryViewModel(
         if (folders.isNotEmpty()) directoryMetadataRepository.setTags(folders, tags)
     }
     fun deleteSelected() = launchAction {
+        migrateLegacyReadingStates(selectedItems())
         selectedItems().also { require(it.isNotEmpty()) { "没有可删除的已选条目" } }
             .forEach { trashRepository.moveToTrash(it.file) }
         indexer.scan(root)
     }
-    fun importDocuments(sources: List<DocumentSource>, onImported: (File) -> Unit = {}) = launchAction {
+    fun importDocuments(sources: List<DocumentSource>, onImported: (String?, File) -> Unit = { _, _ -> }) = launchAction {
         importDocumentsInto(sources, browser.folder(currentFolder.value), onImported)
     }
 
-    fun importIncomingDocuments(sources: List<DocumentSource>, onImported: (File) -> Unit = {}) = launchAction {
+    fun importIncomingDocuments(
+        sources: List<DocumentSource>,
+        onImported: (String?, File) -> Unit = { _, _ -> },
+    ) = launchAction {
         val inbox = when (val result = libraryService.createFolder(root, INBOX_DIRECTORY)) {
             is LibraryResult.Success -> result.file
             is LibraryResult.Conflict -> result.existing
@@ -184,7 +193,7 @@ class LibraryViewModel(
     private suspend fun importDocumentsInto(
         sources: List<DocumentSource>,
         destination: File,
-        onImported: (File) -> Unit,
+        onImported: (String?, File) -> Unit,
     ) {
         var first: File? = null
         val failures = mutableListOf<String>()
@@ -201,17 +210,43 @@ class LibraryViewModel(
             }
         }
         indexer.scan(root)
-        first?.let(onImported)
+        first?.let { file -> onImported(stableDocumentId(file), file) }
         if (failures.isNotEmpty()) {
             error.value = "已导入 $importedCount 个，失败 ${failures.size} 个。${failures.joinToString("；")}"
         }
         if (importedCount == 0 && failures.isNotEmpty()) error(failures.joinToString("；"))
     }
 
-    fun importFolder(source: TreeDocumentSource, onImported: (File) -> Unit = {}) = launchAction {
+    fun importFolder(
+        source: TreeDocumentSource,
+        onImported: (String?, File) -> Unit = { _, _ -> },
+    ) = launchAction {
         val imported = folderImportCoordinator.import(source, browser.folder(currentFolder.value))
         indexer.scan(root)
-        onImported(imported.firstMarkdown)
+        onImported(stableDocumentId(imported.firstMarkdown), imported.firstMarkdown)
+    }
+
+    private suspend fun stableDocumentId(file: File): String? {
+        val relative = root.toPath().toAbsolutePath().normalize()
+            .relativize(file.toPath().toAbsolutePath().normalize())
+            .toString()
+            .replace(File.separatorChar, '/')
+        return catalog.getByPath(relative)?.id
+    }
+
+    private suspend fun migrateLegacyReadingStates(items: List<LibraryItem>) {
+        catalog.all().filter { document ->
+            items.any { item ->
+                if (item.isFolder) {
+                    document.relativePath.startsWith("${item.relativePath.trimEnd('/')}/")
+                } else {
+                    document.id == item.id
+                }
+            }
+        }.forEach { document ->
+            val file = root.resolve(document.relativePath.replace('/', File.separatorChar))
+            readingStateRepository.migrate(editorDocumentFor(file, root).id, document.id)
+        }
     }
 
     private fun launchAction(clearSelection: Boolean = true, action: suspend () -> Unit) {

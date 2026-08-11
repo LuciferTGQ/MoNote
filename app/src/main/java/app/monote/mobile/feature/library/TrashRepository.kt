@@ -35,6 +35,7 @@ class TrashRepository(
     private val beforeReconcileCommit: suspend () -> Unit = {},
     private val afterPendingRestoreWritten: suspend () -> Unit = {},
     private val afterRestoreMove: suspend () -> Unit = {},
+    private val onDocumentsPermanentlyDeleted: suspend (Set<String>) -> Unit = {},
     private val requestRescan: () -> Unit = {},
 ) {
     private val guard = LibraryPathGuard(paths)
@@ -291,8 +292,13 @@ class TrashRepository(
                         reconcileDirectoryMetadataLocked()
                         TrashDeleteResult.NotFound(stableId)
                     } else {
+                        val documentIds = parseEntry(entryRoot)
+                            ?.documents
+                            ?.mapTo(linkedSetOf(), TrashDocumentMetadata::id)
+                            .orEmpty()
                         pendingRestoreTrustStore.remove(stableId)
                         deleteTree(entryRoot)
+                        onDocumentsPermanentlyDeleted(documentIds)
                         reconcileDirectoryMetadataLocked()
                         TrashDeleteResult.Success(setOf(stableId))
                     }
@@ -334,6 +340,8 @@ class TrashRepository(
                 }
             }
             try {
+                val documentIds = listEntriesLocked()
+                    .flatMapTo(linkedSetOf()) { entry -> entry.documents.map(TrashDocumentMetadata::id) }
                 val deleted = linkedSetOf<String>()
                 Files.list(trash).use { children ->
                     children.forEach { child ->
@@ -350,6 +358,7 @@ class TrashRepository(
                         deleted += child.fileName.toString()
                     }
                 }
+                onDocumentsPermanentlyDeleted(documentIds)
                 reconcileDirectoryMetadataLocked()
                 TrashDeleteResult.Success(deleted)
             } catch (error: CancellationException) {
@@ -368,6 +377,9 @@ class TrashRepository(
                 deleteTree(guard.trashEntryRoot(entry.stableId))
                 deleted += entry.stableId
             }
+            onDocumentsPermanentlyDeleted(
+                entries.flatMapTo(linkedSetOf()) { entry -> entry.documents.map(TrashDocumentMetadata::id) },
+            )
             reconcileDirectoryMetadataLocked()
             TrashDeleteResult.Success(deleted)
         } catch (error: CancellationException) {

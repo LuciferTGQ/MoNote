@@ -74,6 +74,27 @@ describe("editor", () => {
     editor.destroy()
   })
 
+  it("searches source text with looping navigation", () => {
+    const editor = createEditor(host, "Alpha\nalpha\nALPHA", () => undefined)
+
+    expect(editor.search("alpha", "reset")).toEqual({ current: 1, total: 3 })
+    expect(editor.readingPosition()).toMatchObject({ line: 1, column: 5 })
+    expect(editor.search("alpha", "previous")).toEqual({ current: 3, total: 3 })
+    expect(editor.readingPosition()).toMatchObject({ line: 3, column: 5 })
+    expect(editor.search("", "reset")).toEqual({ current: 0, total: 0 })
+    editor.destroy()
+  })
+
+  it("restores a valid editor line and clamps stale coordinates", () => {
+    const editor = createEditor(host, "one\ntwo\nthree", () => undefined)
+
+    editor.restoreReadingPosition(2, 2, 0.5)
+    expect(editor.readingPosition()).toMatchObject({ line: 2, column: 2 })
+    editor.restoreReadingPosition(99, 99, 1)
+    expect(editor.readingPosition()).toMatchObject({ line: 3, column: 5 })
+    editor.destroy()
+  })
+
   it("clears redo history when a newer document has identical text", () => {
     const editor = createEditor(host, "same", () => undefined)
 

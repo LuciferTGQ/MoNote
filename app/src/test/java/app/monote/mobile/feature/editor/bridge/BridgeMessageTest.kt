@@ -1,5 +1,6 @@
 package app.monote.mobile.feature.editor.bridge
 
+import app.monote.mobile.feature.editor.DocumentHeading
 import kotlinx.serialization.SerializationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -32,14 +33,36 @@ class BridgeMessageTest {
             WebMessage.Ready,
             WebMessage.ExternalLink("https://example.com/notes"),
             WebMessage.RenderError("graph TD;A-->B", "invalid diagram"),
+            WebMessage.OutlineChanged(
+                listOf(DocumentHeading("heading-1", "第一章", 1, 1)),
+            ),
+            WebMessage.SearchResult(current = 2, total = 4),
+            WebMessage.ActiveHeadingChanged("heading-1"),
+            WebMessage.ReadingPositionChanged(
+                editorLine = 8,
+                editorColumn = 3,
+                editorProgress = 0.25f,
+                previewHeadingId = "heading-1",
+                previewProgress = 0.5f,
+            ),
+            WebMessage.PreviewTapped,
         )
         val nativeMessages = listOf(
             NativeMessage.Load(2, "body", EditorMode.SPLIT, EditorTheme.DARK),
             NativeMessage.Command(EditorCommand.UNDO),
-            NativeMessage.SetMode(EditorMode.PREVIEW),
+            NativeMessage.SetMode(EditorMode.READ),
             NativeMessage.SetFontSize(20),
             NativeMessage.RefreshPreview(2),
             NativeMessage.SetPreviewPolicy(LargeDocumentPolicy.LIVE),
+            NativeMessage.SearchDocument("复习", SearchAction.RESET),
+            NativeMessage.NavigateToHeading("heading-1"),
+            NativeMessage.RestoreReadingPosition(
+                editorLine = 8,
+                editorColumn = 3,
+                editorProgress = 0.25f,
+                previewHeadingId = "heading-1",
+                previewProgress = 0.5f,
+            ),
         )
 
         webMessages.forEach { assertEquals(it, codec.decodeWeb(codec.encodeWeb(it))) }
@@ -68,6 +91,24 @@ class BridgeMessageTest {
             """{"type":"setPreviewPolicy","largeDocument":"always"}""",
         )
         assertNativeRejected("""{"type":"setFontSize","pixels":17}""")
+        assertNativeRejected(
+            """{"type":"searchDocument","query":"${"x".repeat(257)}","action":"reset"}""",
+        )
+        assertNativeRejected(
+            """{"type":"navigateToHeading","headingId":""}""",
+        )
+        assertNativeRejected(
+            """{"type":"restoreReadingPosition","editorLine":1,"editorColumn":0,"editorProgress":1.1,"previewHeadingId":null,"previewProgress":0.0}""",
+        )
+        assertRejected(
+            """{"type":"outlineChanged","headings":[{"id":"same","title":"A","level":1,"sourceLine":1},{"id":"same","title":"B","level":2,"sourceLine":2}]}""",
+        )
+        assertRejected(
+            """{"type":"searchResult","current":2,"total":1}""",
+        )
+        assertRejected(
+            """{"type":"readingPositionChanged","editorLine":0,"editorColumn":0,"editorProgress":0.0,"previewHeadingId":null,"previewProgress":0.0}""",
+        )
     }
 
     @Test

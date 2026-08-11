@@ -12,6 +12,12 @@ import { EditorSelection, EditorState, type Text } from "@codemirror/state"
 import { EditorView, keymap } from "@codemirror/view"
 
 import type { EditorCommand } from "./bridge"
+import {
+  findLiteralMatches,
+  nextSearchIndex,
+  type SearchAction,
+  type SearchResult,
+} from "./reading"
 import { utf8ByteLength } from "./utf8"
 
 export const EDITOR_HISTORY_DEPTH = 500
@@ -119,13 +125,23 @@ export interface EditorController {
   load(text: string, revision: number): boolean
   replaceSelection(text: string): void
   execute(command: EditorCommand): boolean
+  search(query: string, action: SearchAction): SearchResult
+  readingPosition(): EditorReadingPosition
+  restoreReadingPosition(line: number, column: number, progress: number): void
   focus(): void
   destroy(): void
+}
+
+export interface EditorReadingPosition {
+  line: number
+  column: number
+  progress: number
 }
 
 export interface EditorOptions {
   largeDocumentBytes?: number
   largeChangeDelayMs?: number
+  onPositionChange?: () => void
 }
 
 const DEFAULT_LARGE_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -155,6 +171,11 @@ function textRangeUtf8ByteLength(
   }
 }
 
+function canScrollSelectionIntoView(): boolean {
+  return typeof Range !== "undefined" &&
+    typeof Range.prototype.getClientRects === "function"
+}
+
 export function createEditor(
   parent: HTMLElement,
   initialText: string,
@@ -166,6 +187,10 @@ export function createEditor(
   let pendingChange: ReturnType<typeof setTimeout> | null = null
   let documentUtf8Bytes = utf8ByteLength(initialText)
   let view: EditorView
+  let searchQuery = ""
+  let searchRevision = -1
+  let searchMatches: Array<{ from: number; to: number }> = []
+  let searchIndex = -1
   const largeDocumentBytes =
     options.largeDocumentBytes ?? DEFAULT_LARGE_DOCUMENT_BYTES
   const largeChangeDelayMs =
@@ -195,8 +220,10 @@ export function createEditor(
         keymap.of([...defaultKeymap, ...historyKeymap]),
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
+          if (update.selectionSet) options.onPositionChange?.()
           if (!update.docChanged) return
           revision += 1
+          searchRevision = -1
           update.changes.iterChanges(
             (fromA, toA, _fromB, _toB, inserted) => {
               documentUtf8Bytes -= textRangeUtf8ByteLength(
@@ -246,6 +273,10 @@ export function createEditor(
       hasNativeLoad = true
       cancelPendingChange()
       documentUtf8Bytes = utf8ByteLength(text)
+      searchQuery = ""
+      searchRevision = -1
+      searchMatches = []
+      searchIndex = -1
       view.setState(createState(text))
       return true
     },
@@ -276,6 +307,59 @@ export function createEditor(
       })
       view.focus()
       return true
+    },
+    search(query, action) {
+      if (action === "reset" || query !== searchQuery || searchRevision !== revision) {
+        searchQuery = query
+        searchRevision = revision
+        searchMatches = findLiteralMatches(view.state.doc.toString(), query)
+        searchIndex = -1
+      }
+      searchIndex = nextSearchIndex(searchIndex, searchMatches.length, action)
+      const match = searchMatches[searchIndex]
+      if (match) {
+        const selection = EditorSelection.single(match.from, match.to)
+        view.dispatch(
+          canScrollSelectionIntoView()
+            ? {
+                selection,
+                effects: EditorView.scrollIntoView(match.from, { y: "center" }),
+              }
+            : { selection },
+        )
+      }
+      return {
+        current: searchIndex < 0 ? 0 : searchIndex + 1,
+        total: searchMatches.length,
+      }
+    },
+    readingPosition() {
+      const head = view.state.selection.main.head
+      const line = view.state.doc.lineAt(head)
+      const maximum = Math.max(0, view.scrollDOM.scrollHeight - view.scrollDOM.clientHeight)
+      return {
+        line: line.number,
+        column: head - line.from,
+        progress: maximum === 0
+          ? 0
+          : Math.min(1, Math.max(0, view.scrollDOM.scrollTop / maximum)),
+      }
+    },
+    restoreReadingPosition(line, column, progress) {
+      const safeLine = Math.min(Math.max(1, line), view.state.doc.lines)
+      const targetLine = view.state.doc.line(safeLine)
+      const head = Math.min(targetLine.to, targetLine.from + Math.max(0, column))
+      const selection = EditorSelection.cursor(head)
+      view.dispatch(
+        canScrollSelectionIntoView()
+          ? {
+              selection,
+              effects: EditorView.scrollIntoView(head, { y: "center" }),
+            }
+          : { selection },
+      )
+      const maximum = Math.max(0, view.scrollDOM.scrollHeight - view.scrollDOM.clientHeight)
+      if (maximum > 0) view.scrollDOM.scrollTop = maximum * Math.min(1, Math.max(0, progress))
     },
     focus() {
       view.focus()

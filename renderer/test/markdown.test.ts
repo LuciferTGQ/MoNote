@@ -5,6 +5,7 @@ import {
   createRenderer,
   hydrateDeferredCodeBlock,
   renderMarkdown,
+  renderMarkdownDocument,
 } from "../src/markdown"
 
 describe("Markdown rendering", () => {
@@ -17,6 +18,38 @@ describe("Markdown rendering", () => {
     expect(html).toContain('type="checkbox"')
     expect(html).toContain("checked")
     expect(html).toContain("<s>old</s>")
+  })
+
+  it("extracts stable ATX and Setext headings while ignoring fenced code", () => {
+    const source = [
+      "# 第一章",
+      "",
+      "第一章",
+      "------",
+      "",
+      "```md",
+      "# 不是标题",
+      "```",
+      "",
+      "### **小节**",
+    ].join("\n")
+
+    const first = renderMarkdownDocument(source)
+    const second = renderMarkdownDocument(source)
+
+    expect(first.headings).toHaveLength(3)
+    expect(first.headings.map((heading) => heading.title)).toEqual([
+      "第一章",
+      "第一章",
+      "小节",
+    ])
+    expect(first.headings.map((heading) => heading.level)).toEqual([1, 2, 3])
+    expect(first.headings.map((heading) => heading.sourceLine)).toEqual([1, 3, 10])
+    expect(new Set(first.headings.map((heading) => heading.id)).size).toBe(3)
+    expect(second.headings).toEqual(first.headings)
+    first.headings.forEach((heading) => {
+      expect(first.html).toContain(`id="${heading.id}"`)
+    })
   })
 
   it("renders a table of contents, footnotes, and trusted-off KaTeX", () => {

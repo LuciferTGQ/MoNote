@@ -16,6 +16,7 @@ import app.monote.mobile.data.catalog.CatalogRepository
 import app.monote.mobile.data.catalog.LibraryIndexer
 import app.monote.mobile.data.catalog.MoNoteDatabase
 import app.monote.mobile.feature.editor.RecoveryStore
+import app.monote.mobile.feature.editor.ReadingStateRepository
 import app.monote.mobile.feature.importing.FolderImportCoordinator
 import app.monote.mobile.feature.importing.ImportCoordinator
 import app.monote.mobile.feature.importing.IncomingIntentParser
@@ -99,6 +100,7 @@ class AppContainer(context: Context) {
         val catalog = CatalogRepository(database.catalogDao(), mirror)
         val indexer = LibraryIndexer(catalog)
         val directoryMetadataRepository = DirectoryMetadataRepository(paths)
+        val readingStateRepository = ReadingStateRepository(paths)
         val moveRecoveryRepository = MoveRecoveryRepository(paths)
         val requestRescan: () -> Unit = {
             applicationScope.launch { indexer.scan(paths.root) }
@@ -116,6 +118,7 @@ class AppContainer(context: Context) {
             PendingRestoreTrustStore(applicationContext.noBackupFilesDir.resolve("pending_restore_trust")),
             directoryMetadataRepository = directoryMetadataRepository,
             requestRescan = requestRescan,
+            onDocumentsPermanentlyDeleted = readingStateRepository::remove,
         )
         applicationScope.launch {
             try {
@@ -141,6 +144,7 @@ class AppContainer(context: Context) {
             moveRecoveryRepository = moveRecoveryRepository,
             storageInspector = StorageInspector(paths, applicationContext.cacheDir.resolve("renderer")),
             recoveryStore = RecoveryStore(paths.recovery),
+            readingStateRepository = readingStateRepository,
         )
     }
 
@@ -166,4 +170,5 @@ data class LibraryServices(
     val moveRecoveryRepository: MoveRecoveryRepository,
     val storageInspector: StorageInspector,
     val recoveryStore: RecoveryStore,
+    val readingStateRepository: ReadingStateRepository,
 )
