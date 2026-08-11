@@ -30,6 +30,8 @@ cross-device continuation.
 | 11. Receive Markdown from WeChat and other Android apps | `a75b6c6` | 14 API 30 incoming-Intent tests and the trusted WebView round trip passed; 173 JVM regressions passed with 5 environment skips; lint reported 0 errors; four precise external actions, non-exported debug provider, forbidden-permission absence, and renderer-complete APK verified (`ED7E1CB2…A392D`) |
 | 12. Responsive editor, toolbar, orientation locks, and safe exit | `195575b` | 75 renderer tests and production build passed; 177 JVM tests passed with 5 environment skips; 3 API 30 responsive Compose tests and the final trusted WebView round trip passed; lint reported 0 errors; final renderer-complete APK installed and launched on API 30 (`15DDFEBE…7AD07AF`) |
 
+| 12.1. Embedded editor visibility hotfix | `548cb14` | Reproduced the blank editor after opening an imported Markdown file on API 30; constrained the WebView to a clipped native host; 177 JVM tests passed with 5 environment skips, 6 focused API 30 editor tests passed, lint reported 0 errors, and manual edit/autosave/preview verification passed. APK SHA-256: `3B70CB66F4CA12E4B5F391970FF4A3BDAC4C08E730651734ADE587171F397008` |
+
 Every completed implementation task is kept as an independent commit. A task is
 pushed only after specification review, code-quality review, and fresh
 verification succeed. In-progress task code is not a rollback checkpoint.
