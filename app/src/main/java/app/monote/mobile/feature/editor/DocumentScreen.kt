@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
@@ -234,7 +235,11 @@ private fun ColumnScope.EditorSurfaceArea(
     val modeTag = if (isLandscape) "editor-mode-split"
     else if (state.selectedTab == EditorTab.Edit) "editor-mode-edit" else "editor-mode-preview"
     BoxWithConstraints(
-        modifier = Modifier.fillMaxWidth().weight(1f).testTag(modeTag),
+        modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)
+            .clipToBounds()
+            .testTag(modeTag),
     ) {
         surface(Modifier.fillMaxSize())
         if (isLandscape) {

@@ -2,6 +2,8 @@ package app.monote.mobile.feature.editor
 
 import android.annotation.SuppressLint
 import android.net.Uri
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -51,14 +53,24 @@ fun DocumentSurface(
                 )
                 .addPathHandler("/library/", libraryHandler)
                 .build()
-            restrictedWebView(
+            val hostedWebView = restrictedWebView(
                 context = context,
                 assetLoader = assetLoader,
                 controller = controller,
                 onExternalLink = { currentExternalLink(it) },
-            ).also {
-                webView = it
-                it.loadUrl(DOCUMENT_SURFACE_URL)
+            )
+            webView = hostedWebView
+            FrameLayout(context).apply {
+                clipChildren = true
+                clipToPadding = true
+                addView(
+                    hostedWebView,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                hostedWebView.loadUrl(DOCUMENT_SURFACE_URL)
             }
         },
     )
@@ -85,6 +97,9 @@ private fun restrictedWebView(
     controller: DocumentSurfaceController,
     onExternalLink: (Uri) -> Unit,
 ): WebView = WebView(context).apply {
+    // Some Android WebView builds composite a hardware layer at the Compose root
+    // instead of the AndroidView's bounds, hiding both controls and document text.
+    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
     settings.apply {
         javaScriptEnabled = true
         allowFileAccess = false
