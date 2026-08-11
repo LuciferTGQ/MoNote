@@ -169,12 +169,29 @@ class LibraryViewModel(
         indexer.scan(root)
     }
     fun importDocuments(sources: List<DocumentSource>, onImported: (File) -> Unit = {}) = launchAction {
+        importDocumentsInto(sources, browser.folder(currentFolder.value), onImported)
+    }
+
+    fun importIncomingDocuments(sources: List<DocumentSource>, onImported: (File) -> Unit = {}) = launchAction {
+        val inbox = when (val result = libraryService.createFolder(root, INBOX_DIRECTORY)) {
+            is LibraryResult.Success -> result.file
+            is LibraryResult.Conflict -> result.existing
+            is LibraryResult.Failure -> throw result.cause
+        }
+        importDocumentsInto(sources, browser.folder(inbox), onImported)
+    }
+
+    private suspend fun importDocumentsInto(
+        sources: List<DocumentSource>,
+        destination: File,
+        onImported: (File) -> Unit,
+    ) {
         var first: File? = null
         val failures = mutableListOf<String>()
         var importedCount = 0
         sources.forEach { source ->
             try {
-                val imported = importCoordinator.import(source, browser.folder(currentFolder.value))
+                val imported = importCoordinator.import(source, destination)
                 importedCount += 1
                 if (first == null) first = imported.file
             } catch (cancelled: CancellationException) {
@@ -289,3 +306,4 @@ class LibraryViewModelFactory(
 }
 
 private const val MAX_SCAN_WARNINGS = 5
+private const val INBOX_DIRECTORY = "收件箱"

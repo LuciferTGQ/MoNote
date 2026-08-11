@@ -48,7 +48,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.monote.mobile.AppContainer
 import app.monote.mobile.LibraryServices
-import app.monote.mobile.feature.importing.DocumentSource
+import app.monote.mobile.feature.importing.ContentUriDocumentSource
+import app.monote.mobile.feature.importing.IncomingRequest
 import app.monote.mobile.feature.library.ClearableStorageCategory
 import app.monote.mobile.feature.library.ImportSheet
 import app.monote.mobile.feature.library.LibraryScreen
@@ -63,10 +64,11 @@ import app.monote.mobile.feature.onboarding.PermissionViewModel
 import app.monote.mobile.ui.SplashGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.io.File
-import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.SimpleFileVisitor
@@ -99,7 +101,15 @@ fun MoNoteApp(
                     services = withContext(Dispatchers.IO) { appContainer.libraryServices() }
                 },
                 onPermissionLost = permissionViewModel::refresh,
-                readyContent = { services?.let { NavigationShell(it) } ?: InitializationLoading() },
+                readyContent = {
+                    services?.let {
+                        NavigationShell(
+                            services = it,
+                            incomingRequests = appContainer.incomingRequests,
+                            acknowledgeIncoming = appContainer::acknowledgeIncomingRequest,
+                        )
+                    } ?: InitializationLoading()
+                },
             )
         } else {
             PermissionScreen(
@@ -198,10 +208,27 @@ internal fun launchAllFilesAccessSettings(
 }
 
 @Composable
-private fun NavigationShell(services: LibraryServices? = null) {
+private fun NavigationShell(
+    services: LibraryServices? = null,
+    incomingRequests: Flow<IncomingRequest> = emptyFlow(),
+    acknowledgeIncoming: (String) -> Unit = {},
+) {
     val navController = rememberNavController()
     val currentEntry by navController.currentBackStackEntryAsState()
     val currentPath = currentEntry?.destination?.route
+    var incomingRequest by remember { mutableStateOf<IncomingRequest?>(null) }
+
+    LaunchedEffect(incomingRequests) {
+        incomingRequests.collect { request ->
+            incomingRequest = request
+            if (navController.currentDestination?.route != Route.Library.path) {
+                navController.navigate(Route.Library.path) {
+                    launchSingleTop = true
+                    popUpTo(Route.Library.path)
+                }
+            }
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -231,7 +258,17 @@ private fun NavigationShell(services: LibraryServices? = null) {
         ) {
             composable(Route.Library.path) {
                 if (services == null) PlaceholderDestination(Route.Library) else Box(Modifier.fillMaxSize().testTag("route-library")) {
-                    LibraryDestination(services, onOpenEditor = { navController.navigate(Route.Editor.path) }, onOpenStorage = { navController.navigate(Route.Storage.path) }, onOpenSettings = { navController.navigate(Route.Settings.path) })
+                    LibraryDestination(
+                        services = services,
+                        incomingRequest = incomingRequest,
+                        onIncomingConsumed = { id ->
+                            acknowledgeIncoming(id)
+                            if (incomingRequest?.id == id) incomingRequest = null
+                        },
+                        onOpenEditor = { navController.navigate(Route.Editor.path) },
+                        onOpenStorage = { navController.navigate(Route.Storage.path) },
+                        onOpenSettings = { navController.navigate(Route.Settings.path) },
+                    )
                 }
             }
             composable(Route.Trash.path) {
@@ -249,6 +286,8 @@ private fun NavigationShell(services: LibraryServices? = null) {
 @Composable
 private fun LibraryDestination(
     services: LibraryServices,
+    incomingRequest: IncomingRequest?,
+    onIncomingConsumed: (String) -> Unit,
     onOpenEditor: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -264,6 +303,7 @@ private fun LibraryDestination(
     var selectedTree by remember { mutableStateOf<Uri?>(null) }
     var selectedTreeMetadata by remember { mutableStateOf<ResolvedUriMetadata?>(null) }
     var folderImporting by remember { mutableStateOf(false) }
+    var incomingImporting by remember { mutableStateOf(false) }
     var exportFile by remember { mutableStateOf<File?>(null) }
     val importFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         selectedTree = null
@@ -297,6 +337,26 @@ private fun LibraryDestination(
     LaunchedEffect(selectedTree) {
         selectedTreeMetadata = selectedTree?.let { resolveUriMetadata(context, it) }
     }
+    LaunchedEffect(incomingRequest?.id) {
+        val request = incomingRequest ?: return@LaunchedEffect
+        selectedUris = emptyList()
+        selectedUriMetadata = emptyList()
+        selectedTree = null
+        selectedTreeMetadata = null
+        incomingImporting = false
+        request.error?.let { failure ->
+            model.reportError("无法导入：$failure")
+            onIncomingConsumed(request.id)
+        }
+        if (request.error == null) model.clearError()
+        if (request.error == null && request.documents.isEmpty()) {
+            model.reportError("无法导入：没有可读取的 Markdown 文件")
+            onIncomingConsumed(request.id)
+        }
+    }
+    LaunchedEffect(state.error, incomingRequest?.id) {
+        if (incomingRequest != null && state.error != null) incomingImporting = false
+    }
     BackHandler(enabled = state.canNavigateUp) { model.goToParent() }
     LibraryScreen(
         state = state,
@@ -323,12 +383,32 @@ private fun LibraryDestination(
         onDelete = { model.deleteSelected() },
         onRecoverMove = model::recoverMove,
     )
-    if (selectedUris.isNotEmpty() && selectedUriMetadata.size == selectedUris.size) {
+    incomingRequest?.takeIf { it.error == null && it.documents.isNotEmpty() }?.let { request ->
+        ImportSheet(
+            selectedNames = request.documents.map { it.displayName },
+            targetDirectory = "MoNote/收件箱",
+            warning = "文件来自其他应用，将复制到墨笺后再打开；原文件不会被修改。",
+            error = state.error,
+            confirming = incomingImporting,
+            onDismiss = { if (!incomingImporting) onIncomingConsumed(request.id) },
+            onConfirm = {
+                incomingImporting = true
+                model.importIncomingDocuments(request.documents) {
+                    incomingImporting = false
+                    onIncomingConsumed(request.id)
+                    onOpenEditor()
+                }
+            },
+        )
+    }
+    if (incomingRequest == null && selectedUris.isNotEmpty() && selectedUriMetadata.size == selectedUris.size) {
         ImportSheet(selectedUriMetadata.map { it.displayName }, state.currentFolder.relativeTo(services.paths.root).path.ifBlank { "MoNote" }, onDismiss = {
             selectedUris = emptyList()
             selectedUriMetadata = emptyList()
         }) {
-            val sources = selectedUris.zip(selectedUriMetadata).map { (uri, metadata) -> ContentResolverDocumentSource(context, uri, metadata) }
+            val sources = selectedUris.zip(selectedUriMetadata).map { (uri, metadata) ->
+                ContentUriDocumentSource(context.contentResolver, uri, metadata.displayName, metadata.mimeType)
+            }
             selectedUris = emptyList()
             selectedUriMetadata = emptyList()
             model.importDocuments(sources) { onOpenEditor() }
@@ -421,17 +501,6 @@ private fun StorageDestination(services: LibraryServices) {
         },
         error = error,
     )
-}
-
-private class ContentResolverDocumentSource(
-    private val context: Context,
-    private val uri: Uri,
-    metadata: ResolvedUriMetadata,
-) : DocumentSource {
-    override val displayName: String = metadata.displayName
-    override val mimeType: String? = metadata.mimeType
-    override suspend fun open(): InputStream = context.contentResolver.openInputStream(uri)
-        ?: throw java.io.IOException("无法读取所选文件：$displayName")
 }
 
 private fun clearDirectoryContents(directory: File) {

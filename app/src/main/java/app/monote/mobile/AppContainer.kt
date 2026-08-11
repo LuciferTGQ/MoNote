@@ -1,6 +1,7 @@
 package app.monote.mobile
 
 import android.content.Context
+import android.content.Intent
 import android.os.Environment
 import android.util.Log
 import androidx.datastore.core.DataStore
@@ -17,6 +18,9 @@ import app.monote.mobile.data.catalog.MoNoteDatabase
 import app.monote.mobile.feature.editor.RecoveryStore
 import app.monote.mobile.feature.importing.FolderImportCoordinator
 import app.monote.mobile.feature.importing.ImportCoordinator
+import app.monote.mobile.feature.importing.IncomingIntentParser
+import app.monote.mobile.feature.importing.IncomingParseResult
+import app.monote.mobile.feature.importing.IncomingRequest
 import app.monote.mobile.feature.library.DirectoryMetadataRepository
 import app.monote.mobile.feature.library.LibraryService
 import app.monote.mobile.feature.library.MoveRecoveryRepository
@@ -27,13 +31,20 @@ import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
 class AppContainer(context: Context) {
     private val applicationContext = context.applicationContext
     private val libraryLock = Any()
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val incomingIntentParser by lazy { IncomingIntentParser(applicationContext.contentResolver) }
+    private val mutableIncomingRequests = MutableSharedFlow<IncomingRequest>(replay = 1, extraBufferCapacity = 4)
+    val incomingRequests: SharedFlow<IncomingRequest> = mutableIncomingRequests.asSharedFlow()
 
     val settings: DataStore<Preferences> = PreferenceDataStoreFactory.create {
         applicationContext.preferencesDataStoreFile(SETTINGS_FILE)
@@ -56,6 +67,21 @@ class AppContainer(context: Context) {
             initializedLibraryServices ?: createLibraryServices().also {
                 initializedLibraryServices = it
             }
+        }
+    }
+
+    suspend fun receiveIncomingIntent(intent: Intent) {
+        val request = when (val result = incomingIntentParser.parse(intent)) {
+            is IncomingParseResult.Accepted -> result.request
+            is IncomingParseResult.Unsupported -> IncomingRequest(error = result.reason)
+        }
+        mutableIncomingRequests.emit(request)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun acknowledgeIncomingRequest(id: String) {
+        if (mutableIncomingRequests.replayCache.lastOrNull()?.id == id) {
+            mutableIncomingRequests.resetReplayCache()
         }
     }
 
