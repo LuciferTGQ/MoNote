@@ -6,12 +6,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import app.monote.mobile.core.storage.DocumentFingerprint
+import app.monote.mobile.feature.editor.bridge.EditorCommand
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -49,12 +52,35 @@ class DocumentScreenTest {
         composeRule.onNodeWithText("取消").assertIsDisplayed()
     }
 
-    private fun show(state: EditorUiState, isLandscape: Boolean) {
+    @Test
+    fun toolbarShowsClearCommonActionsAndMovesAdvancedActionsUnderMore() {
+        val commands = mutableListOf<EditorCommand>()
+        show(
+            EditorUiState(session = session(), loading = false),
+            isLandscape = false,
+            onCommand = commands::add,
+        )
+
+        listOf("标题", "粗体", "列表", "待办", "更多").forEach { label ->
+            composeRule.onNodeWithText(label).assertIsDisplayed()
+        }
+        composeRule.onNodeWithText("更多").performClick()
+        composeRule.onNodeWithText("斜体").assertIsDisplayed().performClick()
+
+        assertEquals(listOf(EditorCommand.ITALIC), commands)
+    }
+
+    private fun show(
+        state: EditorUiState,
+        isLandscape: Boolean,
+        onCommand: (EditorCommand) -> Unit = {},
+    ) {
         composeRule.setContent {
             MaterialTheme {
                 DocumentScreen(
                     state = state,
                     isLandscape = isLandscape,
+                    onCommand = onCommand,
                     surface = { modifier -> Box(modifier) },
                 )
             }
