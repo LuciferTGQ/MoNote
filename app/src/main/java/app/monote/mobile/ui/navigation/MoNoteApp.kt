@@ -52,6 +52,8 @@ import app.monote.mobile.LibraryServices
 import app.monote.mobile.feature.importing.ContentUriDocumentSource
 import app.monote.mobile.feature.editor.DocumentDestination
 import app.monote.mobile.feature.editor.EditorDocument
+import app.monote.mobile.feature.editor.OrientationPreference
+import app.monote.mobile.feature.editor.OrientationPreferenceStore
 import app.monote.mobile.feature.editor.editorDocumentFor
 import app.monote.mobile.feature.importing.IncomingRequest
 import app.monote.mobile.feature.library.ClearableStorageCategory
@@ -65,6 +67,11 @@ import app.monote.mobile.feature.library.restoreResultMessage
 import app.monote.mobile.feature.library.deleteResultMessage
 import app.monote.mobile.feature.onboarding.PermissionScreen
 import app.monote.mobile.feature.onboarding.PermissionViewModel
+import app.monote.mobile.feature.settings.AppSettingsStore
+import app.monote.mobile.feature.settings.AppThemePreference
+import app.monote.mobile.feature.settings.EditorFontSize
+import app.monote.mobile.feature.settings.SettingsScreen
+import app.monote.mobile.feature.settings.SettingsUiState
 import app.monote.mobile.ui.SplashGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -311,9 +318,49 @@ private fun NavigationShell(
                     )
                 }
             }
-            composable(Route.Settings.path) { PlaceholderDestination(Route.Settings) }
+            composable(Route.Settings.path) {
+                if (settings == null) PlaceholderDestination(Route.Settings)
+                else SettingsDestination(settings)
+            }
         }
     }
+}
+
+@Composable
+private fun SettingsDestination(
+    settings: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>,
+) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val appSettings = remember(settings) { AppSettingsStore(settings) }
+    val orientationSettings = remember(settings) { OrientationPreferenceStore(settings) }
+    val theme by appSettings.theme.collectAsStateWithLifecycle(AppThemePreference.FollowSystem)
+    val fontSize by appSettings.fontSize.collectAsStateWithLifecycle(EditorFontSize.Standard)
+    val autoSave by appSettings.autoSave.collectAsStateWithLifecycle(true)
+    val orientation by orientationSettings.preference.collectAsStateWithLifecycle(
+        OrientationPreference.FollowSystem,
+    )
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun savePreference(block: suspend () -> Unit) {
+        scope.launch {
+            try {
+                block()
+                error = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                error = "无法保存设置，请重试"
+            }
+        }
+    }
+
+    SettingsScreen(
+        state = SettingsUiState(theme, fontSize, autoSave, orientation, error),
+        onTheme = { value -> savePreference { appSettings.setTheme(value) } },
+        onFontSize = { value -> savePreference { appSettings.setFontSize(value) } },
+        onAutoSave = { value -> savePreference { appSettings.setAutoSave(value) } },
+        onOrientation = { value -> savePreference { orientationSettings.set(value) } },
+    )
 }
 
 @Composable

@@ -37,6 +37,7 @@ class BridgeMessageTest {
             NativeMessage.Load(2, "body", EditorMode.SPLIT, EditorTheme.DARK),
             NativeMessage.Command(EditorCommand.UNDO),
             NativeMessage.SetMode(EditorMode.PREVIEW),
+            NativeMessage.SetFontSize(20),
             NativeMessage.RefreshPreview(2),
             NativeMessage.SetPreviewPolicy(LargeDocumentPolicy.LIVE),
         )
@@ -66,6 +67,7 @@ class BridgeMessageTest {
         assertNativeRejected(
             """{"type":"setPreviewPolicy","largeDocument":"always"}""",
         )
+        assertNativeRejected("""{"type":"setFontSize","pixels":17}""")
     }
 
     @Test

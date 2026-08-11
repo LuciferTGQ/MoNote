@@ -136,6 +136,9 @@ function receiveNativeMessage(message: NativeMessage): void {
     case "setSplitRatio":
       surface.style.setProperty("--split-ratio", `${message.ratio * 100}%`)
       return
+    case "setFontSize":
+      surface.style.setProperty("--document-font-size", `${message.pixels}px`)
+      return
     case "refreshPreview":
       if (scheduler.refresh(editor.text, message.revision)) {
         manualPreview.hidden = true

@@ -11,6 +11,8 @@ import app.monote.mobile.feature.editor.bridge.EditorMode
 import app.monote.mobile.feature.editor.bridge.EditorTheme
 import app.monote.mobile.feature.editor.bridge.NativeMessage
 import app.monote.mobile.feature.editor.bridge.WebMessage
+import app.monote.mobile.feature.settings.AppSettingsStore
+import app.monote.mobile.feature.settings.EditorFontSize
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -30,6 +32,7 @@ class EditorViewModel(
     private val paths: LibraryDirectories,
     private val recoveryStore: RecoveryStore,
     private val orientationStore: OrientationPreferenceStore,
+    private val appSettingsStore: AppSettingsStore,
 ) : ViewModel() {
     private val reducer = DocumentSessionReducer()
     private val mutableUiState = MutableStateFlow(EditorUiState())
@@ -38,6 +41,8 @@ class EditorViewModel(
     private var surfaceReady = false
     private var isLandscape = false
     private var theme = EditorTheme.LIGHT
+    private var editorFontSize = EditorFontSize.Standard
+    private var documentLoadStarted = false
     private var splitRatioSaveJob: Job? = null
     private val saveCoordinator = SaveCoordinator(
         scope = viewModelScope,
@@ -66,7 +71,27 @@ class EditorViewModel(
                 if (surfaceReady) surfaceController.send(NativeMessage.SetSplitRatio(ratio))
             }
         }
-        viewModelScope.launch { loadDocument() }
+        viewModelScope.launch {
+            appSettingsStore.fontSize.collect { size ->
+                editorFontSize = size
+                if (surfaceReady) surfaceController.send(NativeMessage.SetFontSize(size.pixels))
+            }
+        }
+        viewModelScope.launch {
+            appSettingsStore.autoSave.collect { enabled ->
+                val session = mutableUiState.value.session
+                if (session == null) {
+                    if (!documentLoadStarted) {
+                        documentLoadStarted = true
+                        loadDocument(enabled)
+                    }
+                    return@collect
+                }
+                val updated = reducer.reduce(session, DocumentEvent.AutoSaveChanged(enabled))
+                mutableUiState.update { it.copy(session = updated) }
+                if (updated.isDirty) saveCoordinator.onChanged(updated)
+            }
+        }
     }
 
     fun selectTab(tab: EditorTab) {
@@ -130,7 +155,7 @@ class EditorViewModel(
     fun saveAndExit(onExit: () -> Unit) {
         val session = mutableUiState.value.session ?: return onExit()
         viewModelScope.launch {
-            saveCoordinator.flushForBackground(session)
+            saveCoordinator.flushForBackground(session.copy(autoSaveEnabled = true))
             val latest = mutableUiState.value.session
             if (latest != null && !latest.isDirty && latest.externalConflict == null) {
                 saveCoordinator.onCleanClose(latest)
@@ -161,7 +186,9 @@ class EditorViewModel(
 
     fun saveNow() {
         val session = mutableUiState.value.session ?: return
-        viewModelScope.launch { saveCoordinator.flushForBackground(session) }
+        viewModelScope.launch {
+            saveCoordinator.flushForBackground(session.copy(autoSaveEnabled = true))
+        }
     }
 
     fun restoreRecovery() {
@@ -235,7 +262,7 @@ class EditorViewModel(
         }
     }
 
-    private suspend fun loadDocument() {
+    private suspend fun loadDocument(autoSaveEnabled: Boolean) {
         try {
             val result = withContext(Dispatchers.IO) {
                 val file = validateDocument(document.file)
@@ -253,7 +280,7 @@ class EditorViewModel(
                     saveStatus = SaveStatus.Saved,
                     canUndo = false,
                     canRedo = false,
-                    autoSaveEnabled = true,
+                    autoSaveEnabled = autoSaveEnabled,
                 )
                 session to recoveryStore.candidate(session.id, file)
             }
@@ -297,6 +324,7 @@ class EditorViewModel(
                 surfaceReady = true
                 sendLoad()
                 setSplitRatio(mutableUiState.value.splitRatio)
+                surfaceController.send(NativeMessage.SetFontSize(editorFontSize.pixels))
             }
             is WebMessage.Changed -> {
                 val session = mutableUiState.value.session ?: return

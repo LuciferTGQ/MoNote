@@ -59,6 +59,10 @@ sealed interface NativeMessage {
     data class SetSplitRatio(val ratio: Float) : NativeMessage
 
     @Serializable
+    @SerialName("setFontSize")
+    data class SetFontSize(val pixels: Int) : NativeMessage
+
+    @Serializable
     @SerialName("refreshPreview")
     data class RefreshPreview(val revision: Long) : NativeMessage
 
@@ -190,6 +194,9 @@ class BridgeMessageCodec(
             is NativeMessage.SetSplitRatio -> if (message.ratio !in 0.25f..0.75f) {
                 throw SerializationException("Split ratio is outside the supported range")
             }
+            is NativeMessage.SetFontSize -> if (message.pixels !in SUPPORTED_FONT_SIZES) {
+                throw SerializationException("Font size is outside the supported set")
+            }
         }
     }
 
@@ -211,5 +218,9 @@ class BridgeMessageCodec(
         ) {
             throw SerializationException("External link must be an absolute HTTP(S) URL")
         }
+    }
+
+    private companion object {
+        val SUPPORTED_FONT_SIZES = setOf(14, 16, 20)
     }
 }

@@ -72,7 +72,7 @@ body {
   overflow: auto;
   font-family:
     "JetBrains Mono", "Cascadia Code", "Noto Sans Mono CJK SC", monospace;
-  font-size: 16px;
+  font-size: var(--document-font-size, 16px);
   line-height: 1.7;
 }
 
@@ -98,6 +98,7 @@ body {
   padding: 24px max(20px, env(safe-area-inset-right)) 96px
     max(20px, env(safe-area-inset-left));
   overflow-wrap: anywhere;
+  font-size: var(--document-font-size, 16px);
 }
 
 .markdown-body > * {

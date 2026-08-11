@@ -5,6 +5,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.isSystemInDarkTheme
+import app.monote.mobile.feature.settings.AppThemePreference
 
 private val LightColors = lightColorScheme(
     primary = Ink900,
@@ -35,9 +36,17 @@ private val DarkColors = darkColorScheme(
 )
 
 @Composable
-fun MoNoteTheme(content: @Composable () -> Unit) {
+fun MoNoteTheme(
+    preference: AppThemePreference = AppThemePreference.FollowSystem,
+    content: @Composable () -> Unit,
+) {
+    val dark = when (preference) {
+        AppThemePreference.FollowSystem -> isSystemInDarkTheme()
+        AppThemePreference.Light -> false
+        AppThemePreference.Dark -> true
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (dark) DarkColors else LightColors,
         content = content,
     )
 }

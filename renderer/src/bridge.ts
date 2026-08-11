@@ -33,6 +33,7 @@ export type NativeMessage =
   | { type: "command"; name: EditorCommand }
   | { type: "setMode"; mode: EditorMode }
   | { type: "setSplitRatio"; ratio: number }
+  | { type: "setFontSize"; pixels: number }
   | { type: "refreshPreview"; revision: number }
   | {
       type: "setPreviewPolicy"
@@ -136,6 +137,12 @@ export function parseNativeMessage(raw: string): NativeMessage | null {
         Number.isFinite(value.ratio) &&
         value.ratio >= 0.25 &&
         value.ratio <= 0.75
+        ? (value as NativeMessage)
+        : null
+    case "setFontSize":
+      return hasExactKeys(value, ["type", "pixels"]) &&
+        typeof value.pixels === "number" &&
+        [14, 16, 20].includes(value.pixels)
         ? (value as NativeMessage)
         : null
     case "refreshPreview":

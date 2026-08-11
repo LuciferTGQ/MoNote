@@ -7,13 +7,14 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.luminance
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.lifecycle.Lifecycle
@@ -22,6 +23,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.monote.mobile.LibraryServices
+import app.monote.mobile.feature.settings.AppSettingsStore
 
 @Composable
 fun DocumentDestination(
@@ -41,12 +43,13 @@ fun DocumentDestination(
                 paths = services.paths,
                 recoveryStore = services.recoveryStore,
                 orientationStore = OrientationPreferenceStore(settings),
+                appSettingsStore = AppSettingsStore(settings),
             )
         },
     )
     val state by model.uiState.collectAsStateWithLifecycle()
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val darkTheme = isSystemInDarkTheme()
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     LaunchedEffect(isLandscape) { model.setLandscape(isLandscape) }
     LaunchedEffect(darkTheme) { model.setTheme(darkTheme) }
