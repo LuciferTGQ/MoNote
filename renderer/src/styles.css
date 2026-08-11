@@ -195,7 +195,9 @@ body {
 }
 
 .document-surface[data-mode="split"] {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, var(--split-ratio, 50%))
+    minmax(0, calc(100% - var(--split-ratio, 50%)));
 }
 
 .document-surface[data-mode="split"] .editor-pane {

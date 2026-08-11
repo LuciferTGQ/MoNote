@@ -21,6 +21,7 @@ import {
   type ScheduleResult,
 } from "./previewScheduler"
 import { bindLocalImageFallbacks } from "./security"
+import { bindSplitScrollSync } from "./scrollSync"
 
 function requiredElement<T extends Element>(
   parent: ParentNode,
@@ -108,6 +109,10 @@ editor = createEditor(editorPane, "", (change) => {
   channel.send({ type: "changed", ...change })
   showScheduleState(scheduler.update(change.text, change.revision))
 })
+const editorScroller = requiredElement<HTMLElement>(editorPane, ".cm-scroller")
+const disposeScrollSync = bindSplitScrollSync(editorScroller, previewPane, {
+  isEnabled: () => surface.dataset.mode === "split",
+})
 
 function receiveNativeMessage(message: NativeMessage): void {
   switch (message.type) {
@@ -127,6 +132,9 @@ function receiveNativeMessage(message: NativeMessage): void {
       if (message.mode !== "edit") {
         showScheduleState(scheduler.update(editor.text, editor.revision))
       }
+      return
+    case "setSplitRatio":
+      surface.style.setProperty("--split-ratio", `${message.ratio * 100}%`)
       return
     case "refreshPreview":
       if (scheduler.refresh(editor.text, message.revision)) {
@@ -167,6 +175,7 @@ window.addEventListener(
     disposeDeferredCode()
     disposeLinks()
     disposeImages()
+    disposeScrollSync()
     scheduler.destroy()
     editor.destroy()
     channel.dispose()

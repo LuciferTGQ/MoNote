@@ -13,6 +13,14 @@ export type EditorCommand =
   | "heading"
   | "link"
   | "image"
+  | "strike"
+  | "bulletList"
+  | "taskList"
+  | "quote"
+  | "code"
+  | "table"
+  | "math"
+  | "mermaid"
 
 export type NativeMessage =
   | {
@@ -24,6 +32,7 @@ export type NativeMessage =
     }
   | { type: "command"; name: EditorCommand }
   | { type: "setMode"; mode: EditorMode }
+  | { type: "setSplitRatio"; ratio: number }
   | { type: "refreshPreview"; revision: number }
   | {
       type: "setPreviewPolicy"
@@ -52,6 +61,14 @@ const commands = new Set<EditorCommand>([
   "heading",
   "link",
   "image",
+  "strike",
+  "bulletList",
+  "taskList",
+  "quote",
+  "code",
+  "table",
+  "math",
+  "mermaid",
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,6 +128,14 @@ export function parseNativeMessage(raw: string): NativeMessage | null {
     case "setMode":
       return hasExactKeys(value, ["type", "mode"]) &&
         modes.has(value.mode as EditorMode)
+        ? (value as NativeMessage)
+        : null
+    case "setSplitRatio":
+      return hasExactKeys(value, ["type", "ratio"]) &&
+        typeof value.ratio === "number" &&
+        Number.isFinite(value.ratio) &&
+        value.ratio >= 0.25 &&
+        value.ratio <= 0.75
         ? (value as NativeMessage)
         : null
     case "refreshPreview":

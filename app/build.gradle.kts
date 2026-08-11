@@ -6,6 +6,10 @@ plugins {
     alias(libs.plugins.kotlin.kapt)
 }
 
+providers.environmentVariable("MONOTE_APP_BUILD_DIR").orNull
+    ?.takeIf(String::isNotBlank)
+    ?.let { layout.buildDirectory.set(file(it)) }
+
 val rendererDir = rootProject.layout.projectDirectory.dir("renderer").asFile
 val defaultNpmCommand = if (
     System.getProperty("os.name").startsWith("Windows", ignoreCase = true)

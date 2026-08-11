@@ -55,6 +55,10 @@ sealed interface NativeMessage {
     data class SetMode(val mode: EditorMode) : NativeMessage
 
     @Serializable
+    @SerialName("setSplitRatio")
+    data class SetSplitRatio(val ratio: Float) : NativeMessage
+
+    @Serializable
     @SerialName("refreshPreview")
     data class RefreshPreview(val revision: Long) : NativeMessage
 
@@ -108,6 +112,30 @@ enum class EditorCommand {
 
     @SerialName("image")
     IMAGE,
+
+    @SerialName("strike")
+    STRIKE,
+
+    @SerialName("bulletList")
+    BULLET_LIST,
+
+    @SerialName("taskList")
+    TASK_LIST,
+
+    @SerialName("quote")
+    QUOTE,
+
+    @SerialName("code")
+    CODE,
+
+    @SerialName("table")
+    TABLE,
+
+    @SerialName("math")
+    MATH,
+
+    @SerialName("mermaid")
+    MERMAID,
 }
 
 @Serializable
@@ -159,6 +187,9 @@ class BridgeMessageCodec(
             is NativeMessage.SetMode,
             is NativeMessage.SetPreviewPolicy,
             -> Unit
+            is NativeMessage.SetSplitRatio -> if (message.ratio !in 0.25f..0.75f) {
+                throw SerializationException("Split ratio is outside the supported range")
+            }
         }
     }
 

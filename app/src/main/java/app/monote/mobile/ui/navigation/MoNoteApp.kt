@@ -32,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +50,9 @@ import androidx.navigation.compose.rememberNavController
 import app.monote.mobile.AppContainer
 import app.monote.mobile.LibraryServices
 import app.monote.mobile.feature.importing.ContentUriDocumentSource
+import app.monote.mobile.feature.editor.DocumentDestination
+import app.monote.mobile.feature.editor.EditorDocument
+import app.monote.mobile.feature.editor.editorDocumentFor
 import app.monote.mobile.feature.importing.IncomingRequest
 import app.monote.mobile.feature.library.ClearableStorageCategory
 import app.monote.mobile.feature.library.ImportSheet
@@ -105,6 +109,7 @@ fun MoNoteApp(
                     services?.let {
                         NavigationShell(
                             services = it,
+                            settings = appContainer.settings,
                             incomingRequests = appContainer.incomingRequests,
                             acknowledgeIncoming = appContainer::acknowledgeIncomingRequest,
                         )
@@ -210,6 +215,7 @@ internal fun launchAllFilesAccessSettings(
 @Composable
 private fun NavigationShell(
     services: LibraryServices? = null,
+    settings: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>? = null,
     incomingRequests: Flow<IncomingRequest> = emptyFlow(),
     acknowledgeIncoming: (String) -> Unit = {},
 ) {
@@ -217,6 +223,21 @@ private fun NavigationShell(
     val currentEntry by navController.currentBackStackEntryAsState()
     val currentPath = currentEntry?.destination?.route
     var incomingRequest by remember { mutableStateOf<IncomingRequest?>(null) }
+    var editorDocumentId by rememberSaveable { mutableStateOf<String?>(null) }
+    var editorDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
+    val editorDocument = remember(editorDocumentId, editorDocumentPath) {
+        val id = editorDocumentId
+        val path = editorDocumentPath
+        if (id != null && path != null) EditorDocument(id, File(path)) else null
+    }
+
+    fun openEditor(file: File, stableId: String? = null) {
+        val root = services?.paths?.root ?: return
+        val selected = stableId?.let { EditorDocument(it, file) } ?: editorDocumentFor(file, root)
+        editorDocumentId = selected.id
+        editorDocumentPath = selected.file.absolutePath
+        navController.navigate(Route.Editor.path) { launchSingleTop = true }
+    }
 
     LaunchedEffect(incomingRequests) {
         incomingRequests.collect { request ->
@@ -232,8 +253,8 @@ private fun NavigationShell(
 
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                Route.entries.forEach { route ->
+            if (currentPath != Route.Editor.path) NavigationBar {
+                Route.entries.filter { it != Route.Editor }.forEach { route ->
                     NavigationBarItem(
                         selected = currentPath == route.path,
                         onClick = {
@@ -265,7 +286,7 @@ private fun NavigationShell(
                             acknowledgeIncoming(id)
                             if (incomingRequest?.id == id) incomingRequest = null
                         },
-                        onOpenEditor = { navController.navigate(Route.Editor.path) },
+                        onOpenEditor = { id, file -> openEditor(file, id) },
                         onOpenStorage = { navController.navigate(Route.Storage.path) },
                         onOpenSettings = { navController.navigate(Route.Settings.path) },
                     )
@@ -277,7 +298,19 @@ private fun NavigationShell(
             composable(Route.Storage.path) {
                 if (services == null) PlaceholderDestination(Route.Storage) else StorageDestination(services)
             }
-            composable(Route.Editor.path) { PlaceholderDestination(Route.Editor) }
+            composable(Route.Editor.path) {
+                val document = editorDocument
+                if (services == null || settings == null || document == null) {
+                    PlaceholderDestination(Route.Editor)
+                } else {
+                    DocumentDestination(
+                        document = document,
+                        services = services,
+                        settings = settings,
+                        onExit = { navController.popBackStack() },
+                    )
+                }
+            }
             composable(Route.Settings.path) { PlaceholderDestination(Route.Settings) }
         }
     }
@@ -288,7 +321,7 @@ private fun LibraryDestination(
     services: LibraryServices,
     incomingRequest: IncomingRequest?,
     onIncomingConsumed: (String) -> Unit,
-    onOpenEditor: () -> Unit,
+    onOpenEditor: (String?, File) -> Unit,
     onOpenStorage: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -361,7 +394,7 @@ private fun LibraryDestination(
     LibraryScreen(
         state = state,
         onQueryChange = model::updateQuery,
-        onOpenItem = { if (it.isFolder) model.openFolder(it.file) else onOpenEditor() },
+        onOpenItem = { if (it.isFolder) model.openFolder(it.file) else onOpenEditor(it.id, it.file) },
         onOpenStorage = onOpenStorage,
         onOpenSettings = onOpenSettings,
         onNavigateUp = model::goToParent,
@@ -393,10 +426,10 @@ private fun LibraryDestination(
             onDismiss = { if (!incomingImporting) onIncomingConsumed(request.id) },
             onConfirm = {
                 incomingImporting = true
-                model.importIncomingDocuments(request.documents) {
+                model.importIncomingDocuments(request.documents) { imported ->
                     incomingImporting = false
                     onIncomingConsumed(request.id)
-                    onOpenEditor()
+                    onOpenEditor(null, imported)
                 }
             },
         )
@@ -411,7 +444,7 @@ private fun LibraryDestination(
             }
             selectedUris = emptyList()
             selectedUriMetadata = emptyList()
-            model.importDocuments(sources) { onOpenEditor() }
+            model.importDocuments(sources) { imported -> onOpenEditor(null, imported) }
         }
     }
     selectedTree?.let { tree -> selectedTreeMetadata?.let { treeMetadata ->
@@ -428,10 +461,10 @@ private fun LibraryDestination(
             onDismiss = { if (!folderImporting) selectedTree = null },
             onConfirm = {
                 folderImporting = true
-                model.importFolder(ContentResolverTreeDocumentSource(context, tree, treeMetadata.displayName)) {
+                model.importFolder(ContentResolverTreeDocumentSource(context, tree, treeMetadata.displayName)) { imported ->
                     folderImporting = false
                     selectedTree = null
-                    onOpenEditor()
+                    onOpenEditor(null, imported)
                 }
             },
         )

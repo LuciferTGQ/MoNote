@@ -57,6 +57,42 @@ export function formatSelection(
       return wrapSelection(text, from, to, "[", "](https://)", "链接")
     case "image":
       return wrapSelection(text, from, to, "![", "](assets/)", "图片")
+    case "strike":
+      return wrapSelection(text, from, to, "~~", "~~", "删除线")
+    case "code":
+      return wrapSelection(text, from, to, "`", "`", "代码")
+    case "bulletList":
+    case "taskList":
+    case "quote": {
+      const prefix =
+        command === "bulletList" ? "- " : command === "taskList" ? "- [ ] " : "> "
+      const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1
+      return {
+        text: `${text.slice(0, lineStart)}${prefix}${text.slice(lineStart)}`,
+        anchor: from + prefix.length,
+        head: to + prefix.length,
+      }
+    }
+    case "table":
+      return wrapSelection(
+        text,
+        from,
+        to,
+        "\n| 列 1 | 列 2 |\n| --- | --- |\n| ",
+        " | 内容 |\n",
+        "内容",
+      )
+    case "math":
+      return wrapSelection(text, from, to, "\n$$\n", "\n$$\n", "E = mc^2")
+    case "mermaid":
+      return wrapSelection(
+        text,
+        from,
+        to,
+        "\n```mermaid\n",
+        "\n```\n",
+        "graph TD\n  A --> B",
+      )
     case "heading": {
       const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1
       return {

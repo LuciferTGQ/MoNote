@@ -52,6 +52,9 @@ describe("editor", () => {
       "[site](https://)",
     )
     expect(formatSelection("", 0, 0, "image").text).toBe("![图片](assets/)")
+    expect(formatSelection("done", 0, 4, "strike").text).toBe("~~done~~")
+    expect(formatSelection("item", 0, 0, "taskList").text).toBe("- [ ] item")
+    expect(formatSelection("", 0, 0, "mermaid").text).toContain("```mermaid")
   })
 
   it("rejects a same-revision overwrite and clears history for a newer load", () => {

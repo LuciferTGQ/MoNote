@@ -39,6 +39,11 @@ describe("bridge protocol", () => {
     ).toEqual({ type: "setMode", mode: "preview" })
     expect(
       parseNativeMessage(
+        JSON.stringify({ type: "setSplitRatio", ratio: 0.6 }),
+      ),
+    ).toEqual({ type: "setSplitRatio", ratio: 0.6 })
+    expect(
+      parseNativeMessage(
         JSON.stringify({ type: "refreshPreview", revision: 4 }),
       ),
     ).toEqual({ type: "refreshPreview", revision: 4 })
@@ -63,6 +68,7 @@ describe("bridge protocol", () => {
     '{"type":"load","revision":1,"text":"","mode":"edit","theme":"light","extra":true}',
     '{"type":"command","name":"deleteAll"}',
     '{"type":"setMode","mode":"fullscreen"}',
+    '{"type":"setSplitRatio","ratio":0.9}',
     '{"type":"refreshPreview","revision":"4"}',
     '{"type":"setPreviewPolicy","largeDocument":"always"}',
   ])("rejects malformed or unknown native message %s", (raw) => {
