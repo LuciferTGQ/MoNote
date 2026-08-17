@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".feature.editor.DocumentSurfaceTestActivity"
+            android:exported="false" />
+        <provider
+            android:name="app.monote.mobile.feature.importing.FakeShareProvider"
+            android:authorities="app.monote.mobile.debug.share"
+            android:exported="false" />
+    </application>
+</manifest>

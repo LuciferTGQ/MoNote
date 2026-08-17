@@ -1,0 +1,238 @@
+:root {
+  color-scheme: light;
+  font-family:
+    Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, -apple-system,
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --surface: #fbfaf7;
+  --panel: #ffffff;
+  --ink: #24211d;
+  --muted: #746d64;
+  --border: #e6e0d8;
+  --accent: #6b4f35;
+  --code: #f3efe9;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171512;
+  --panel: #201d19;
+  --ink: #eee8df;
+  --muted: #aaa197;
+  --border: #39342e;
+  --accent: #d0a77f;
+  --code: #2a2621;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app,
+.document-surface {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.document-surface {
+  position: relative;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  background: var(--surface);
+}
+
+.editor-pane,
+.preview-pane {
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+}
+
+.editor-pane {
+  overflow: hidden;
+}
+
+.editor-pane .cm-editor {
+  height: 100%;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.editor-pane .cm-scroller {
+  overflow: auto;
+  font-family:
+    "JetBrains Mono", "Cascadia Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: var(--document-font-size, 16px);
+  line-height: 1.7;
+}
+
+.editor-pane .cm-content {
+  max-width: 880px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 24px max(18px, env(safe-area-inset-right)) 96px
+    max(18px, env(safe-area-inset-left));
+  caret-color: var(--accent);
+}
+
+.editor-pane .cm-focused {
+  outline: none;
+}
+
+.editor-pane .cm-gutters {
+  display: none;
+}
+
+.preview-pane {
+  overflow: auto;
+  padding: 24px max(20px, env(safe-area-inset-right)) 96px
+    max(20px, env(safe-area-inset-left));
+  overflow-wrap: anywhere;
+  font-size: var(--document-font-size, 16px);
+}
+
+.markdown-body > * {
+  max-width: 880px;
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  line-height: 1.25;
+}
+
+.markdown-body a {
+  color: var(--accent);
+}
+
+.markdown-body img,
+.markdown-body svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-body pre,
+.markdown-body code {
+  font-family:
+    "JetBrains Mono", "Cascadia Code", "Noto Sans Mono CJK SC", monospace;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--code);
+}
+
+.markdown-body :not(pre) > code {
+  padding: 0.12em 0.35em;
+  border-radius: 5px;
+  background: var(--code);
+}
+
+.markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+}
+
+.image-placeholder,
+.render-error {
+  color: var(--muted);
+}
+
+.mermaid-block {
+  min-height: 48px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.manual-preview {
+  position: absolute;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 2;
+  padding: 11px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: white;
+  background: var(--accent);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 18%);
+}
+
+.render-status {
+  position: absolute;
+  left: max(18px, env(safe-area-inset-left));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 2;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.document-surface[data-mode="edit"] .preview-pane,
+.document-surface[data-mode="preview"] .editor-pane,
+.document-surface[data-mode="read"] .editor-pane {
+  display: none;
+}
+
+.markdown-body mark[data-monote-search] {
+  padding: 0;
+  color: inherit;
+  background: #ffe58f;
+}
+
+.markdown-body mark[data-monote-search-current="true"] {
+  color: #fff;
+  background: #b45f06;
+}
+
+.document-surface[data-mode="split"] {
+  grid-template-columns:
+    minmax(0, var(--split-ratio, 50%))
+    minmax(0, calc(100% - var(--split-ratio, 50%)));
+}
+
+.document-surface[data-mode="split"] .editor-pane {
+  border-right: 1px solid var(--border);
+}
+
+@media (orientation: portrait) and (max-width: 700px) {
+  .document-surface[data-mode="split"] {
+    grid-template: minmax(0, 1fr) minmax(0, 1fr) / minmax(0, 1fr);
+  }
+
+  .document-surface[data-mode="split"] .editor-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

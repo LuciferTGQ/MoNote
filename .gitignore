@@ -7,5 +7,10 @@
 local.properties
 *.apk
 *.aab
+artifacts/*.png
 *.jks
 *.keystore
+.tools/
+renderer/node_modules/
+renderer/dist/
+app/src/main/assets/renderer/
